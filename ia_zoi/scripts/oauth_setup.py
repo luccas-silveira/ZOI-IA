@@ -1,12 +1,22 @@
-"""Configuração interativa do fluxo OAuth 2.0 para o IA‑ZOI.
+"""Configuração interativa do fluxo OAuth 2.0 para o IA‑ZOI (versão atualizada).
 
-Este script simplifica o processo de obtenção do ``access_token`` e do
-``refresh_token`` para a API do GoHighLevel. Ele orienta o usuário a
-fornecer as credenciais do aplicativo (Client ID e Client Secret), abre
-o link de consentimento para instalar a aplicação no GoHighLevel,
-recebe o código de autorização gerado e finalmente troca esse código
-pelos tokens de acesso e atualização. As credenciais e tokens são
-persistidos em ``.env`` e em ``data/gohighlevel_token.json``.
+Esta versão do script mantém o mesmo propósito do original – obter o
+``access_token`` e o ``refresh_token`` junto à API do GoHighLevel e
+persisti‑los nos arquivos ``.env`` e ``data/gohighlevel_token.json`` –
+mas com algumas melhorias:
+
+1. Variáveis já definidas no ``.env`` não são solicitadas novamente. O
+   usuário só é questionado quando uma informação estiver ausente.
+2. Quando o ``redirect_uri`` apontar para ``localhost``, o servidor
+   temporário para captura do código de autorização é sempre iniciado,
+   sem solicitar confirmação. Para outros ``redirect_uri``, o link de
+   autorização é aberto automaticamente se possível.
+3. Após receber e salvar os tokens de agência, o script executa
+   ``fetch_locations.main()`` para obter as localizações onde o app
+   está instalado e ``refresh_tokens.manage_location_tokens()`` para
+   gerar os tokens específicos de cada localização. Dessa forma,
+   comandos dependentes de tokens de localização (como ``get_users``)
+   funcionam imediatamente depois do OAuth.
 
 Execute este script a partir da raiz do projeto:
 
@@ -26,7 +36,7 @@ import sys
 import textwrap
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
 
@@ -73,6 +83,7 @@ def prompt_input(prompt: str, default: Optional[str] = None, secret: bool = Fals
         # Para valores secretos (Client Secret), não ecoar
         if secret:
             import getpass  # noqa: WPS433
+
             value = getpass.getpass(prompt)
         else:
             value = input(prompt)
@@ -83,48 +94,58 @@ def prompt_input(prompt: str, default: Optional[str] = None, secret: bool = Fals
 
 
 def interactive_setup() -> None:
-    """Executa o assistente interativo para configuração do OAuth."""
+    """Executa o assistente interativo para configuração do OAuth atualizado."""
     # Determinar o caminho do .env no projeto
     project_root = Path(__file__).resolve().parents[2]
     env_path = project_root / ".env"
     # Carregar variáveis existentes
     _load_env_file(env_path)
-    print("=== Assistente de Configuração OAuth GoHighLevel ===")
-    # Buscar valores existentes ou vazios
+    print("=== Assistente de Configuração OAuth GoHighLevel (Atualizado) ===")
+
+    # Buscar valores existentes do ambiente
     current_client_id = os.getenv("GHL_CLIENT_ID") or None
     current_client_secret = os.getenv("GHL_CLIENT_SECRET") or None
     current_redirect = os.getenv("GHL_REDIRECT_URI") or None
     current_user_type = os.getenv("GHL_USER_TYPE") or "Company"
 
-    client_id = prompt_input("Informe o GHL_CLIENT_ID", default=current_client_id)
-    client_secret = prompt_input("Informe o GHL_CLIENT_SECRET", default=current_client_secret, secret=True)
-    user_type = prompt_input("Tipo de usuário (Company ou Location)", default=current_user_type) or "Company"
-    # Redirecionamento opcional. Se não fornecido, não será enviado no POST
-    redirect_uri = prompt_input(
-        "Informe o redirect_uri (mesmo utilizado na configuração do app; deixe em branco para omitir)",
-        default=current_redirect,
-    )
-    # Persistir no .env se set_key estiver disponível
-    if client_id:
-        _update_env_file(env_path, "GHL_CLIENT_ID", client_id)
-    if client_secret:
-        _update_env_file(env_path, "GHL_CLIENT_SECRET", client_secret)
-    if redirect_uri:
-        _update_env_file(env_path, "GHL_REDIRECT_URI", redirect_uri)
-    if user_type:
-        _update_env_file(env_path, "GHL_USER_TYPE", user_type)
+    # Perguntar apenas quando o valor estiver ausente
+    client_id: Optional[str] = current_client_id
+    if not client_id:
+        client_id = prompt_input("Informe o GHL_CLIENT_ID")
+        if client_id:
+            _update_env_file(env_path, "GHL_CLIENT_ID", client_id)
+
+    client_secret: Optional[str] = current_client_secret
+    if not client_secret:
+        client_secret = prompt_input("Informe o GHL_CLIENT_SECRET", secret=True)
+        if client_secret:
+            _update_env_file(env_path, "GHL_CLIENT_SECRET", client_secret)
+
+    user_type: str = current_user_type
+    if os.getenv("GHL_USER_TYPE") is None:
+        user_type = prompt_input("Tipo de usuário (Company ou Location)", default=user_type) or user_type
+        if user_type:
+            _update_env_file(env_path, "GHL_USER_TYPE", user_type)
+
+    redirect_uri: Optional[str] = current_redirect
+    if redirect_uri is None:
+        redirect_uri = prompt_input(
+            "Informe o redirect_uri (mesmo utilizado na configuração do app; deixe em branco para omitir)",
+            default=current_redirect,
+        )
+        if redirect_uri:
+            _update_env_file(env_path, "GHL_REDIRECT_URI", redirect_uri)
 
     # Compor a URL de autorização
     base_url = "https://marketplace.leadconnectorhq.com/oauth/chooselocation"
-    # Se não houver redirect_uri, definir um padrão para permitir que o fluxo prossiga,
-    # mas avisaremos mais abaixo que pode causar erro.
+    # Se não houver redirect_uri, definir um padrão para permitir que o fluxo prossiga
     effective_redirect = redirect_uri or "https://example.com/callback"
     params = {
         "response_type": "code",
         "client_id": client_id,
         "redirect_uri": effective_redirect,
         # Escopos mínimos necessários; não inclua offline_access pois não é suportado
-        "scope": "conversations/message.readonly conversations/message.write",
+        "scope": "businesses.readonly businesses.write calendars.readonly calendars.write calendars/events.readonly calendars/events.write calendars/groups.readonly calendars/groups.write calendars/resources.write calendars/resources.readonly campaigns.readonly conversations.readonly conversations.write conversations/message.write conversations/message.readonly conversations/reports.readonly conversations/livechat.write contacts.readonly contacts.write objects/schema.readonly objects/schema.write objects/record.readonly objects/record.write associations.write associations.readonly associations/relation.readonly associations/relation.write courses.write courses.readonly forms.readonly forms.write invoices.readonly invoices.write invoices/schedule.readonly invoices/schedule.write invoices/template.readonly invoices/template.write invoices/estimate.write invoices/estimate.readonly links.readonly lc-email.readonly links.write locations.readonly locations/customValues.readonly locations/customValues.write locations/customFields.readonly locations/customFields.write locations/tasks.readonly locations/tasks.write locations/tags.readonly locations/tags.write locations/templates.readonly medias.readonly medias.write funnels/redirect.readonly funnels/page.readonly funnels/funnel.readonly funnels/pagecount.readonly funnels/redirect.write opportunities.readonly opportunities.write payments/orders.readonly payments/orders.write payments/integration.readonly payments/integration.write payments/transactions.readonly payments/subscriptions.readonly payments/custom-provider.readonly payments/custom-provider.write products.readonly products.write products/prices.readonly products/prices.write products/collection.readonly products/collection.write saas/location.read saas/location.write socialplanner/oauth.readonly socialplanner/oauth.write socialplanner/post.readonly socialplanner/post.write socialplanner/account.readonly socialplanner/account.write socialplanner/csv.readonly socialplanner/csv.write socialplanner/category.readonly socialplanner/tag.readonly store/shipping.readonly store/shipping.write store/setting.readonly store/setting.write surveys.readonly users.readonly workflows.readonly emails/builder.write emails/builder.readonly emails/schedule.readonly wordpress.site.readonly blogs/post.write blogs/post-update.write blogs/check-slug.readonly blogs/category.readonly blogs/author.readonly socialplanner/category.write socialplanner/tag.write blogs/posts.readonly blogs/list.readonly",
     }
     auth_url = f"{base_url}?{urlencode(params)}"
 
@@ -134,10 +155,9 @@ def interactive_setup() -> None:
             -------------------------------------------------------------
             Será necessário autorizar o aplicativo no GoHighLevel.
             Caso tenha configurado um redirect_uri local (por exemplo,
-            http://localhost:5000/callback), o script pode iniciar um servidor
+            http://localhost:5000/callback), o script iniciará um servidor
             temporário para capturar automaticamente o código de autorização.
-            Caso contrário, você poderá copiar manualmente o valor do código
-            presente na URL após a autorização.
+            Caso contrário, a URL de autorização será aberta automaticamente.
             -------------------------------------------------------------
             """
         ).strip()
@@ -145,26 +165,21 @@ def interactive_setup() -> None:
 
     use_local_server = False
     code_from_server: Optional[str] = None
-    # Verificar se o redirect_uri é local (localhost) para oferecer captura automática
+    # Verificar se o redirect_uri é local (localhost) para captura automática
     if effective_redirect.startswith("http://localhost"):
-        answer = prompt_input(
-            "Deseja iniciar um servidor local para capturar o código automaticamente? (s/n)",
-            default="s",
-        )
-        use_local_server = answer.lower().startswith("s")
+        use_local_server = True
 
     if use_local_server:
         # Extraia porta e caminho
-        from urllib.parse import urlparse, parse_qs
-        from http.server import BaseHTTPRequestHandler, HTTPServer
-        import threading
-        import time
-
         parsed = urlparse(effective_redirect)
         host = parsed.hostname or "localhost"
         port = parsed.port or 80
         path = parsed.path or "/"
         code_holder: dict[str, str] = {}
+
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        import threading
+        import time
 
         class CallbackHandler(BaseHTTPRequestHandler):
             def do_GET(self):  # type: ignore
@@ -176,7 +191,7 @@ def interactive_setup() -> None:
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                     self.end_headers()
                     self.wfile.write(
-                        b"<html><body><h3>Autorizacao concluida.</h3><p>Voce ja pode voltar ao terminal.</p></body></html>"
+                        b" Autorizacao concluida. Voce ja pode voltar ao terminal. "
                     )
                 else:
                     self.send_response(400)
@@ -195,7 +210,6 @@ def interactive_setup() -> None:
                 """
             ).strip()
         )
-
         # Abrir o link no navegador automaticamente se possível
         if webbrowser:
             try:
@@ -204,7 +218,6 @@ def interactive_setup() -> None:
                 pass
         else:
             print(f"Abra esta URL no navegador para autorizar o app: {auth_url}")
-
         # Aguardar código
         print("⏳ Aguardando o código de autorização... (pressione Ctrl+C para cancelar)")
         while "code" not in code_holder:
@@ -219,7 +232,7 @@ def interactive_setup() -> None:
         server.shutdown()
         print("✅ Código capturado com sucesso! Continuando...")
     else:
-        # Exibir a URL para o usuário abrir
+        # Exibir a URL para o usuário abrir (fallback)
         print(
             textwrap.dedent(
                 f"""
@@ -232,14 +245,13 @@ def interactive_setup() -> None:
                 """
             ).strip()
         )
-        # Abrir automaticamente se o usuário desejar
+        # Abrir automaticamente se possível (sem perguntar)
         if webbrowser:
             try:
-                open_now = prompt_input("Deseja abrir o link automaticamente? (s/n)", default="s")
-                if open_now.lower().startswith("s"):
-                    webbrowser.open(auth_url)
+                webbrowser.open(auth_url)
             except Exception:
                 pass
+        # Obter código manualmente
         auth_code = prompt_input("Cole o código de autorização recebido")
         if not auth_code:
             print("❌ Nenhum código de autorização fornecido. Encerrando.")
@@ -277,6 +289,24 @@ def interactive_setup() -> None:
     with token_file.open("w", encoding="utf-8") as f:
         json.dump(token_data, f, indent=4, ensure_ascii=False)
     print(f"✅ Tokens obtidos e salvos em {token_file}\n")
+
+    # Chamar scripts adicionais para obter locations e tokens por location
+    try:
+        # Importação tardia para evitar dependência circular
+        from .fetch_locations import main as fetch_locations_main
+
+        print("🔍 Buscando localizações instaladas...")
+        fetch_locations_main()
+    except Exception as exc:
+        print(f"[oauth_setup] Erro ao executar fetch_locations: {exc}")
+
+    try:
+        from .refresh_tokens import manage_location_tokens
+
+        print("🔄 Atualizando tokens das localizações...")
+        manage_location_tokens()
+    except Exception as exc:
+        print(f"[oauth_setup] Erro ao atualizar tokens das localizações: {exc}")
 
 
 def main() -> None:
