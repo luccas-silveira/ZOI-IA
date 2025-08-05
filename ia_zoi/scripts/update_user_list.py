@@ -1,48 +1,92 @@
-"""Obtém a lista de usuários (membros) da agência no GoHighLevel.
+"""Atualiza ou cria um campo personalizado de atribuição no GoHighLevel.
 
-Este script consulta a API `/users` para recuperar todos os usuários
-associados à `locationId` configurada e salva em `data/users.json`
-para uso pelos demais scripts.
+Este script mantém a lista de opções de um campo personalizado do tipo
+*single select* sincronizada com a relação de usuários da subconta.
+Ele deve ser executado sempre que novos usuários forem criados ou
+periodicamente por um agendador.  O nome do campo e a chave base são
+configurados via dicionário ``FIELD_PROPERTIES``.  Por padrão o
+campo é criado no modelo ``contact``, mas você pode alterar o
+alvo definindo a variável de ambiente ``ASSIGNMENT_FIELD_MODEL`` ou
+``CUSTOM_FIELD_MODEL`` (por exemplo, ``opportunity``) antes de rodar
+o script.
 
-Configuração:
-  * Defina `GHL_LOCATION_ID` no seu `.env` para indicar a localização.
-  * Certifique-se de ter um `access_token` de agência válido em
-    `data/gohighlevel_token.json` (via fluxo OAuth ou `refresh_tokens`).
+Ao executar, o script:
 
-Uso:
+1. Carrega a lista de usuários de ``data/users.json`` e gera uma
+   lista de opções (rótulos e valores).
+2. Recupera o ID da primeira localização instalada em
+   ``data/installed_locations_data.json``.
+3. Lê o token de acesso da subconta ou, se ausente, da agência em
+   ``data/gohighlevel_token.json``.
+4. Procura o campo já existente pelo ``fieldKey`` e ``model``; se
+   encontrado, atualiza suas opções. Caso contrário, cria um novo.
+5. Persiste detalhes do campo (ID, modelo, nome, chave) em
+   ``data/campo_gerenciado_detalhes.json`` para consumo pelos
+   webhooks.
+
+Uso típico:
+
     python -m ia_zoi.scripts.get_users
+    python -m ia_zoi.scripts.update_user_list
+
+Alternativamente, configure um agendador (por exemplo, APScheduler) para
+executar esses scripts a cada N horas.
 """
+
 from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
 
-from .. import config
-from ..scripts.refresh_tokens import refresh_agency_token
+from ia_zoi import config
 
-# Caminhos dos arquivos
+# Diretórios e arquivos
 DATA_DIR: Path = config.DATA_DIR
+LOCATIONS_FILE: Path = config.INSTALLED_LOCATIONS_FILE
 TOKEN_FILE: Path = config.GHL_TOKEN_FILE
-OUTPUT_FILE: Path = config.USERS_FILE  # normalmente <DATA_DIR>/users.json
+USERS_FILE: Path = config.USERS_FILE
+MANAGED_FIELD_FILE: Path = config.MANAGED_FIELD_DETAILS_FILE
 
-# API
-API_BASE_URL = "https://services.leadconnectorhq.com"
-API_VERSION = "2021-07-28"
-USERS_ENDPOINT = f"{API_BASE_URL}/users"
+# Configuração da API
+API_BASE_URL: str = "https://services.leadconnectorhq.com"
+API_VERSION: str = "2021-07-28"
+
+# Propriedades padrão do campo de atribuição.
+# Você pode alterar ``name``, ``fieldKey`` ou outros valores conforme
+# necessário.  O ``model`` será sobrescrito dinamicamente se você
+# definir ``ASSIGNMENT_FIELD_MODEL`` ou ``CUSTOM_FIELD_MODEL``.
+FIELD_PROPERTIES: Dict[str, Any] = {
+    "name": "Transferir para:",
+    "dataType": "SINGLE_OPTIONS",
+    "model": "contact",
+    "fieldKey": "transferir_para_o_vendedor",
+    "placeholder": "Selecione o vendedor para transferir",
+    "position": 400,
+}
+
+# Sobrescrever o modelo do campo se variável de ambiente estiver definida
+_env_model = os.getenv("ASSIGNMENT_FIELD_MODEL") or os.getenv("CUSTOM_FIELD_MODEL")
+if _env_model:
+    # Normalizar para minúsculas e remover espaços
+    _env_model = _env_model.strip().lower()
+    # A API espera "contact" ou "opportunity".  Mantemos valor
+    # fornecido para dar flexibilidade, mas alertamos se for outro.
+    FIELD_PROPERTIES["model"] = _env_model
 
 
-def _load_json(path: Path) -> Optional[Any]:
+def _load_json(path: Path, default: Any = None) -> Any:
     try:
         if not path.exists():
-            return None
+            return default
         with path.open("r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return None
+        return default
 
 
 def _save_json(data: Any, path: Path) -> bool:
@@ -55,64 +99,184 @@ def _save_json(data: Any, path: Path) -> bool:
         return False
 
 
-def fetch_users(access_token: str, location_id: str) -> Optional[List[Dict[str, Any]]]:
-    """
-    Chama o endpoint /users?locationId=<location_id> e retorna a lista.
-    """
+def _get_access_token_for_location(location_id: str) -> Optional[str]:
+    """Obtém o token de acesso específico da localização ou, se ausente, o token de agência."""
+    locations_data = _load_json(LOCATIONS_FILE)
+    token: Optional[str] = None
+    if locations_data and isinstance(locations_data, list):
+        for loc in locations_data:
+            if not isinstance(loc, dict):
+                continue
+            loc_id = loc.get("_id") or loc.get("id")
+            if loc_id == location_id:
+                token_data = loc.get("location_specific_token_data")
+                if token_data and token_data.get("access_token"):
+                    token = token_data["access_token"]
+                    break
+    if not token:
+        token_data = _load_json(TOKEN_FILE)
+        if token_data and token_data.get("access_token"):
+            token = token_data["access_token"]
+    return token
+
+
+def _get_first_location_id() -> Optional[str]:
+    """Retorna o ID da primeira localização instalada, se houver."""
+    locations_data = _load_json(LOCATIONS_FILE)
+    if locations_data and isinstance(locations_data, list) and locations_data:
+        loc = locations_data[0]
+        return loc.get("_id") or loc.get("id")
+    return None
+
+
+def _generate_options_from_users() -> List[Dict[str, str]]:
+    """Gera a lista de opções (label/value) a partir do arquivo de usuários."""
+    users_data = _load_json(USERS_FILE, default={"users": []})
+    user_names: List[str] = []
+    if isinstance(users_data, dict) and isinstance(users_data.get("users"), list):
+        for user in users_data["users"]:
+            if not isinstance(user, dict):
+                continue
+            # Tentar extrair o nome completo; alguns eventos retornam "name"
+            name = user.get("name", "").strip()
+            if not name and (user.get("firstName") or user.get("lastName")):
+                name = f"{user.get('firstName', '')} {user.get('lastName', '')}".strip()
+            if name:
+                user_names.append(name)
+    # Remover duplicados e ordenar
+    unique_names = sorted(dict.fromkeys(user_names))
+    # Adicionar opção "Selecionar" ao final
+    if "Selecionar" in unique_names:
+        unique_names.remove("Selecionar")
+    unique_names.append("Selecionar")
+    return [{"label": name, "value": name} for name in unique_names]
+
+
+def _fetch_custom_field(location_id: str, base_field_key: str, model_type: str, token: str) -> Optional[Dict[str, Any]]:
+    """Procura um campo personalizado pelo fieldKey base e modelo."""
+    expected_key = f"{model_type}.{base_field_key}"
+    url = f"{API_BASE_URL}/locations/{location_id}/customFields"
     headers = {
-        "Authorization": f"Bearer {access_token}",
+        "Authorization": f"Bearer {token}",
         "Version": API_VERSION,
         "Accept": "application/json",
     }
-    params = {"locationId": location_id}
+    params = {"model": model_type}
     try:
-        resp = requests.get(USERS_ENDPOINT, headers=headers, params=params, timeout=30)
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        if isinstance(data, dict) and "users" in data:
-            return data["users"]
-        if isinstance(data, list):
-            return data
-        return [data]
-    except requests.RequestException as exc:
-        print(f"[get_users] Erro ao buscar usuários: {exc}")
+        fields = data.get("customFields", [])
+        if not fields and isinstance(data, list):
+            fields = data
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            # A API retorna o fieldKey completo (ex: "contact.transferir_para_o_vendedor")
+            if field.get("fieldKey") == expected_key:
+                return field
+        return None
+    except requests.exceptions.RequestException:
         return None
 
 
+def _create_custom_field(location_id: str, options: List[Dict[str, str]], token: str) -> Optional[Dict[str, Any]]:
+    """Cria um novo campo personalizado com as opções fornecidas."""
+    url = f"{API_BASE_URL}/locations/{location_id}/customFields"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Version": API_VERSION,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "name": FIELD_PROPERTIES["name"],
+        "dataType": FIELD_PROPERTIES["dataType"],
+        "model": FIELD_PROPERTIES["model"],
+        "fieldKey": FIELD_PROPERTIES["fieldKey"],
+        "placeholder": FIELD_PROPERTIES["placeholder"],
+        "options": options,
+        "position": FIELD_PROPERTIES["position"],
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("customField", data)
+    except requests.exceptions.RequestException:
+        return None
+
+
+def _update_custom_field(location_id: str, field_id: str, options: List[Dict[str, str]], token: str) -> bool:
+    """Atualiza as opções de um campo personalizado existente."""
+    url = f"{API_BASE_URL}/locations/{location_id}/customFields/{field_id}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Version": API_VERSION,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {"options": options}
+    try:
+        resp = requests.put(url, headers=headers, json=payload, timeout=15)
+        resp.raise_for_status()
+        return True
+    except requests.exceptions.RequestException:
+        return False
+
+
 def main() -> None:
-    print("--- Script get_users ---")
-
-    # 1) Atualiza token de agência
-    if not refresh_agency_token():
-        print("[get_users] Falha ao atualizar token de agência; abortando.")
-        return
-
-    # 2) Carrega token de arquivo
-    token_data = _load_json(TOKEN_FILE) or {}
-    access_token = token_data.get("access_token")
-    if not access_token:
-        print(f"[get_users] access_token não encontrado em {TOKEN_FILE}.")
-        return
-
-    # 3) Obtém locationId do .env
-    location_id = os.getenv("GHL_LOCATION_ID")
+    print("--- Script update_user_list ---")
+    location_id = _get_first_location_id()
     if not location_id:
-        print("[get_users] GHL_LOCATION_ID não definido.")
+        print(f"[update_user_list] Nenhuma localização encontrada em {LOCATIONS_FILE}.")
         return
-
-    # 4) Faz a requisição
-    print(f"🔍 Buscando usuários para locationId={location_id}...")
-    users = fetch_users(access_token, location_id)
-    if users is None:
+    token = _get_access_token_for_location(location_id)
+    if not token:
+        print("[update_user_list] Token não encontrado para a localização.")
         return
-
-    print(f"[get_users] {len(users)} usuários salvos em {OUTPUT_FILE}.")
-
-    # 5) Grava o resultado
-    if _save_json(users, OUTPUT_FILE):
-        print(f"[get_users] JSON de usuários salvo com sucesso.")
+    options = _generate_options_from_users()
+    # Procurar se o campo já existe
+    existing_field = _fetch_custom_field(
+        location_id,
+        FIELD_PROPERTIES["fieldKey"],
+        FIELD_PROPERTIES["model"],
+        token,
+    )
+    if existing_field and isinstance(existing_field, dict) and existing_field.get("id"):
+        field_id = existing_field["id"]
+        if _update_custom_field(location_id, field_id, options, token):
+            print(f"[update_user_list] Campo existente atualizado (ID: {field_id}).")
+            field_details = {
+                "locationId": location_id,
+                "model": FIELD_PROPERTIES["model"],
+                "fieldKey_base_sent": FIELD_PROPERTIES["fieldKey"],
+                "fieldKey_api_returned": existing_field.get("fieldKey"),
+                "currentId": field_id,
+                "name": FIELD_PROPERTIES["name"],
+                "last_updated_timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            _save_json({"managed_custom_field": field_details}, MANAGED_FIELD_FILE)
+        else:
+            print(f"[update_user_list] Falha ao atualizar o campo (ID: {field_id}).")
     else:
-        print(f"[get_users] Falha ao salvar JSON de usuários em {OUTPUT_FILE}.")
+        # Criar novo campo
+        new_field = _create_custom_field(location_id, options, token)
+        if new_field and isinstance(new_field, dict) and new_field.get("id"):
+            field_id = new_field["id"]
+            print(f"[update_user_list] Novo campo criado (ID: {field_id}).")
+            field_details = {
+                "locationId": location_id,
+                "model": FIELD_PROPERTIES["model"],
+                "fieldKey_base_sent": FIELD_PROPERTIES["fieldKey"],
+                "fieldKey_api_returned": new_field.get("fieldKey"),
+                "currentId": field_id,
+                "name": FIELD_PROPERTIES["name"],
+                "last_updated_timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            _save_json({"managed_custom_field": field_details}, MANAGED_FIELD_FILE)
+        else:
+            print("[update_user_list] Falha ao criar novo campo.")
 
 
 if __name__ == "__main__":

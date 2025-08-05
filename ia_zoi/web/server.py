@@ -1,28 +1,34 @@
-"""Servidor Flask para recebimento de webhooks do GoHighLevel.
+"""Servidor Flask aprimorado para recepção de webhooks e tarefas agendadas.
 
-Este módulo inicializa um aplicativo Flask que expõe duas rotas:
+Esta versão do servidor inclui, além da atualização periódica de tokens,
+um job que sincroniza a lista de usuários e atualiza as opções do
+campo personalizado de atribuição.  O intervalo padrão para essa
+sincronização é de 2 horas, mas pode ser ajustado via variáveis de
+ambiente (``USER_LIST_UPDATE_INTERVAL_HOURS``).
 
-* ``/`` – healthcheck que retorna informações básicas sobre o servidor.
-* ``/webhook`` – endpoint POST para receber eventos do GoHighLevel.
-
-O servidor também configura um agendador (APScheduler) para executar
-tarefas periódicas, como a atualização de tokens.  Essa tarefa é
-executada somente quando o servidor não está em modo debug, para
-evitar execuções duplicadas durante o desenvolvimento.
+Rotas:
+  * ``/`` – healthcheck simples.
+  * ``/webhook`` – endpoint POST para receber eventos do GoHighLevel.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Dict, Optional
 
 from flask import Flask, jsonify, request
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from .. import config
-from .router import process_webhook, run_script, SCRIPT_REFRESH_TOKENS
-
+from ia_zoi import config
+from ia_zoi.web.router_modified import (
+    process_webhook,
+    run_script,
+    SCRIPT_REFRESH_TOKENS,
+    SCRIPT_GET_USERS,
+    SCRIPT_UPDATE_USER_LIST,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +40,16 @@ def create_app() -> Flask:
     @app.route("/", methods=["GET"])
     def health_check() -> Any:
         """Endpoint de verificação de saúde do servidor."""
-        return jsonify(
-            {
-                "status": "ok",
-                "message": "Servidor de webhooks em execução.",
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
-            }
-        ), 200
+        return (
+            jsonify(
+                {
+                    "status": "ok",
+                    "message": "Servidor de webhooks em execução.",
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                }
+            ),
+            200,
+        )
 
     @app.route("/webhook", methods=["POST"])
     def webhook_receiver() -> Any:
@@ -71,13 +80,22 @@ def _scheduled_token_update_job() -> None:
     run_script(SCRIPT_REFRESH_TOKENS)
 
 
+def _scheduled_user_sync_job() -> None:
+    """Job agendado para sincronizar usuários e atualizar campo personalizado."""
+    logger.info("Job agendado: sincronização de usuários e atualização de campo iniciada.")
+    # Ignorar erros individuais; logs já capturam detalhes
+    run_script(SCRIPT_GET_USERS)
+    run_script(SCRIPT_UPDATE_USER_LIST)
+
+
 def run_server() -> None:
     """Inicializa o servidor Flask e o agendador de tarefas."""
     app = create_app()
     scheduler: Optional[BackgroundScheduler] = None
-    # Apenas iniciar scheduler em modo não debug para evitar instâncias duplicadas
+    # Iniciar scheduler somente em modo não debug para evitar instâncias duplicadas
     if not config.FLASK_DEBUG:
         scheduler = BackgroundScheduler(daemon=True)
+        # Atualização de tokens a cada 3 horas (mantém lógica original)
         scheduler.add_job(
             func=_scheduled_token_update_job,
             trigger="interval",
@@ -85,15 +103,34 @@ def run_server() -> None:
             id="job_refresh_tokens",
             replace_existing=True,
         )
+        # Atualização de usuários e campo personalizado
+        interval_hours_str = os.getenv("USER_LIST_UPDATE_INTERVAL_HOURS", "2")
+        try:
+            interval_hours = float(interval_hours_str)
+        except ValueError:
+            interval_hours = 2.0
+        scheduler.add_job(
+            func=_scheduled_user_sync_job,
+            trigger="interval",
+            hours=interval_hours,
+            id="job_user_sync",
+            replace_existing=True,
+        )
         try:
             scheduler.start()
             logger.info(
-                "Agendador APScheduler iniciado; tarefa de atualização de tokens configurada a cada 3 horas."
+                "Agendador APScheduler iniciado; tarefas configuradas (tokens a cada 3h, usuários a cada %s h).",
+                interval_hours_str,
             )
         except Exception as exc:
             logger.error("Erro ao iniciar agendador: %s", exc)
     # Executar o app Flask
-    app.run(host=config.FLASK_HOST, port=config.FLASK_PORT, debug=config.FLASK_DEBUG, use_reloader=config.FLASK_DEBUG)
+    app.run(
+        host=config.FLASK_HOST,
+        port=config.FLASK_PORT,
+        debug=config.FLASK_DEBUG,
+        use_reloader=config.FLASK_DEBUG,
+    )
 
 
 if __name__ == "__main__":
