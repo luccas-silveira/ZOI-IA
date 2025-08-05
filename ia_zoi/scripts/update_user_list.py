@@ -66,7 +66,8 @@ FIELD_PROPERTIES: Dict[str, Any] = {
     "model": "contact",
     "fieldKey": "transferir_para_o_vendedor",
     "placeholder": "Selecione o vendedor para transferir",
-    "position": 400,
+    # A posição é opcional e deve ser string se fornecida. Comentada para evitar erros de trim.
+    # "position": "400",
 }
 
 # Sobrescrever o modelo do campo se variável de ambiente estiver definida
@@ -130,7 +131,18 @@ def _get_first_location_id() -> Optional[str]:
 
 
 def _generate_options_from_users() -> List[Dict[str, str]]:
-    """Gera a lista de opções (label/value) a partir do arquivo de usuários."""
+    """
+    Gera a lista de opções a partir do arquivo de usuários.
+
+    A API do GoHighLevel espera que cada opção possua as chaves
+    ``key`` e ``label`` (ambas strings). A omissão de ``key`` causa
+    um erro ``v.trim is not a function`` no endpoint, pois o backend
+    tenta aplicar ``trim()`` em um valor inexistente. Por isso,
+    retornamos um dicionário com ``key`` e ``label`` iguais ao nome.
+    
+    Também adicionamos uma opção "Selecionar" ao final para permitir
+    que nenhum vendedor seja escolhido explicitamente.
+    """
     users_data = _load_json(USERS_FILE, default={"users": []})
     user_names: List[str] = []
     if isinstance(users_data, dict) and isinstance(users_data.get("users"), list):
@@ -149,7 +161,19 @@ def _generate_options_from_users() -> List[Dict[str, str]]:
     if "Selecionar" in unique_names:
         unique_names.remove("Selecionar")
     unique_names.append("Selecionar")
-    return [{"label": name, "value": name} for name in unique_names]
+    # A API aceita "key", "label" e (muitas vezes) "value".
+    # Para máxima compatibilidade, fornecemos todas as três.  O ``key``
+    # é uma versão normalizada do nome (minúsculas e espaços substituídos
+    # por hífens) e será usado internamente pela API.  O ``label`` é
+    # exibido ao usuário no dropdown, e ``value`` é igual ao nome para
+    # ser retornado no webhook.
+    options: List[Dict[str, str]] = []
+    for name in unique_names:
+        # Normalizar chave: minúsculo, remover espaços excedentes e
+        # substituir espaços por hífens.  Mantemos caracteres acentuados.
+        key_normalized = "-".join(name.strip().lower().split())
+        options.append({"key": key_normalized, "label": name, "value": name})
+    return options
 
 
 def _fetch_custom_field(location_id: str, base_field_key: str, model_type: str, token: str) -> Optional[Dict[str, Any]]:
@@ -182,6 +206,7 @@ def _fetch_custom_field(location_id: str, base_field_key: str, model_type: str, 
 
 def _create_custom_field(location_id: str, options: List[Dict[str, str]], token: str) -> Optional[Dict[str, Any]]:
     """Cria um novo campo personalizado com as opções fornecidas."""
+    # Endpoint para criação de campo. A API aceita o modelo via query string (model=contact/opportunity)
     url = f"{API_BASE_URL}/locations/{location_id}/customFields"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -189,26 +214,36 @@ def _create_custom_field(location_id: str, options: List[Dict[str, str]], token:
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
+    # Monta o payload base; o modelo permanece apenas no query param para maior compatibilidade
     payload = {
         "name": FIELD_PROPERTIES["name"],
         "dataType": FIELD_PROPERTIES["dataType"],
-        "model": FIELD_PROPERTIES["model"],
         "fieldKey": FIELD_PROPERTIES["fieldKey"],
         "placeholder": FIELD_PROPERTIES["placeholder"],
         "options": options,
-        "position": FIELD_PROPERTIES["position"],
+        # Note: position omitted because passing a numeric value triggers a v.trim error in the API
     }
+    # Define os parâmetros de consulta; incluir o modelo (contact/opportunity)
+    params = {"model": FIELD_PROPERTIES["model"]}
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
-        resp.raise_for_status()
+        resp = requests.post(url, headers=headers, params=params, json=payload, timeout=15)
+        # Se a API retornar erro, registre código e corpo para depuração
+        if not resp.ok:
+            print(
+                f"[update_user_list] Erro ao criar campo: status={resp.status_code}, resposta={resp.text}"
+            )
+            resp.raise_for_status()
         data = resp.json()
+        # Alguns endpoints retornam diretamente a lista de campos e não a chave customField
         return data.get("customField", data)
-    except requests.exceptions.RequestException:
+    except requests.exceptions.RequestException as exc:
+        print(f"[update_user_list] Exceção ao criar campo: {exc}")
         return None
 
 
 def _update_custom_field(location_id: str, field_id: str, options: List[Dict[str, str]], token: str) -> bool:
     """Atualiza as opções de um campo personalizado existente."""
+    # Endpoint para atualização de campo. A API também aceita o modelo via query string.
     url = f"{API_BASE_URL}/locations/{location_id}/customFields/{field_id}"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -217,11 +252,18 @@ def _update_custom_field(location_id: str, field_id: str, options: List[Dict[str
         "Accept": "application/json",
     }
     payload = {"options": options}
+    # Parâmetro de consulta para o modelo
+    params = {"model": FIELD_PROPERTIES["model"]}
     try:
-        resp = requests.put(url, headers=headers, json=payload, timeout=15)
-        resp.raise_for_status()
+        resp = requests.put(url, headers=headers, params=params, json=payload, timeout=15)
+        if not resp.ok:
+            print(
+                f"[update_user_list] Erro ao atualizar campo: status={resp.status_code}, resposta={resp.text}"
+            )
+            resp.raise_for_status()
         return True
-    except requests.exceptions.RequestException:
+    except requests.exceptions.RequestException as exc:
+        print(f"[update_user_list] Exceção ao atualizar campo: {exc}")
         return False
 
 
