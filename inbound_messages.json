@@ -1,0 +1,24 @@
+{
+  "lastUpdate": "2025-09-06T22:20:55.404982+00:00",
+  "messages": [
+    {
+      "type": "InboundMessage",
+      "locationId": "citQs4acsN1StzOEDuvj",
+      "versionId": "68955c3d676ec82f16254a4a",
+      "appId": "68955c3d676ec82f16254a4a",
+      "body": "Teste",
+      "contactId": "ZDfT7pvNi6m3i7RhD7pu",
+      "contentType": "text/plain",
+      "conversationId": "cqeWX29MMyTiZegw5Q5P",
+      "dateAdded": "2025-09-06T22:20:54.499Z",
+      "direction": "inbound",
+      "messageType": "Custom",
+      "messageId": "KM1x1h7YkUb0ZPeWLOn1",
+      "status": "delivered",
+      "source": "api",
+      "conversationProviderId": "628f88b07cf43a7641c58089",
+      "timestamp": "2025-09-06T22:20:55.122Z",
+      "webhookId": "63fcc2ec-fe5e-4325-ae89-00a605f28148"
+    }
+  ]
+}

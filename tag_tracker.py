@@ -12,6 +12,7 @@ from aiohttp import web
 # =========================
 TAG_NAME = "ia/atendimento/ativa"
 STORE_PATH = Path("tag_ia_atendimento_ativa.json")
+MESSAGE_STORE_PATH = Path("inbound_messages.json")
 PORT = 8081
 
 # Opcional: verificar assinatura RSA dos webhooks (requer 'cryptography')
@@ -34,7 +35,8 @@ T1hhTiaCeIY/OwwwNUY2yvcCAwEAAQ==
 -----END PUBLIC KEY-----"""
 
 # Memória (simples) para idempotência
-PROCESSED = set()
+PROCESSED_TAGS = set()
+PROCESSED_MESSAGES = set()
 
 
 def now_iso():
@@ -54,6 +56,21 @@ def load_store():
 def save_store(store):
     store["lastUpdate"] = now_iso()
     STORE_PATH.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def load_message_store():
+    if MESSAGE_STORE_PATH.exists():
+        try:
+            return json.loads(MESSAGE_STORE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            logging.exception("Falha lendo o inbound store; recriando.")
+    return {"lastUpdate": now_iso(), "messages": []}
+
+
+def save_message_store(store):
+    store["lastUpdate"] = now_iso()
+    MESSAGE_STORE_PATH.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def verify_signature(payload_bytes: bytes, signature_b64: str) -> bool:
@@ -94,6 +111,7 @@ async def handle_list(_req):
     )
 
 
+
 async def handle_contact_tag(request: web.Request):
     raw = await request.read()
 
@@ -111,9 +129,9 @@ async def handle_contact_tag(request: web.Request):
     # Idempotência (se o webhookId vier no payload)
     wh_id = event.get("webhookId")
     if wh_id:
-        if wh_id in PROCESSED:
+        if wh_id in PROCESSED_TAGS:
             return web.json_response({"ok": True, "dedup": True})
-        PROCESSED.add(wh_id)
+        PROCESSED_TAGS.add(wh_id)
 
     # Checa tipo do evento
     if event.get("type") != "ContactTagUpdate":
@@ -138,6 +156,33 @@ async def handle_contact_tag(request: web.Request):
     return web.json_response({"ok": True, "present": TAG_NAME in tags})
 
 
+async def handle_inbound_message(request: web.Request):
+    raw = await request.read()
+
+    sig = request.headers.get("x-wh-signature") or request.headers.get("X-Wh-Signature")
+    if sig and not verify_signature(raw, sig):
+        return web.json_response({"error": "invalid signature"}, status=401)
+
+    try:
+        event = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    wh_id = event.get("webhookId")
+    if wh_id:
+        if wh_id in PROCESSED_MESSAGES:
+            return web.json_response({"ok": True, "dedup": True})
+        PROCESSED_MESSAGES.add(wh_id)
+
+    store = load_message_store()
+    msgs = store.get("messages") or []
+    msgs.append(event)
+    store["messages"] = msgs
+    save_message_store(store)
+
+    return web.json_response({"ok": True})
+
+
 def build_app():
     app = web.Application()
     app.add_routes(
@@ -145,6 +190,7 @@ def build_app():
             web.get("/healthz", handle_health),
             web.get("/contacts/ativa", handle_list),
             web.post("/webhooks/ghl/contact-tag", handle_contact_tag),
+            web.post("/webhooks/ghl/inbound-message", handle_inbound_message),
         ]
     )
     return app
