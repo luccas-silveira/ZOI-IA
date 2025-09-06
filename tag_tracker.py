@@ -12,8 +12,7 @@ from aiohttp import web
 # =========================
 TAG_NAME = "ia/atendimento/ativa"
 STORE_PATH = Path("tag_ia_atendimento_ativa.json")
-MESSAGE_STORE_PATH = Path("inbound_messages.json")
-OUTBOUND_MESSAGE_STORE_PATH = Path("outbound_messages.json")
+MESSAGES_DIR = Path("messages")
 PORT = 8081
 
 # Opcional: verificar assinatura RSA dos webhooks (requer 'cryptography')
@@ -60,36 +59,22 @@ def save_store(store):
     STORE_PATH.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_message_store():
-    if MESSAGE_STORE_PATH.exists():
+def load_contact_messages(contact_id: str):
+    MESSAGES_DIR.mkdir(exist_ok=True)
+    path = MESSAGES_DIR / f"{contact_id}.json"
+    if path.exists():
         try:
-            return json.loads(MESSAGE_STORE_PATH.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
-            logging.exception("Falha lendo o inbound store; recriando.")
+            logging.exception("Falha lendo o histórico de %s; recriando.", contact_id)
     return {"lastUpdate": now_iso(), "messages": []}
 
 
-def save_message_store(store):
+def save_contact_messages(contact_id: str, store):
     store["lastUpdate"] = now_iso()
-    MESSAGE_STORE_PATH.write_text(
-        json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-
-def load_outbound_message_store():
-    if OUTBOUND_MESSAGE_STORE_PATH.exists():
-        try:
-            return json.loads(OUTBOUND_MESSAGE_STORE_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            logging.exception("Falha lendo o outbound store; recriando.")
-    return {"lastUpdate": now_iso(), "messages": []}
-
-
-def save_outbound_message_store(store):
-    store["lastUpdate"] = now_iso()
-    OUTBOUND_MESSAGE_STORE_PATH.write_text(
-        json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    MESSAGES_DIR.mkdir(exist_ok=True)
+    path = MESSAGES_DIR / f"{contact_id}.json"
+    path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def verify_signature(payload_bytes: bytes, signature_b64: str) -> bool:
@@ -192,12 +177,17 @@ async def handle_inbound_message(request: web.Request):
             return web.json_response({"ok": True, "dedup": True})
         PROCESSED_MESSAGES.add(wh_id)
 
-    store = load_message_store()
+    contact_id = event.get("contactId")
+    if not contact_id:
+        return web.json_response({"error": "missing contact id"}, status=422)
+    body = event.get("body")
+    store = load_contact_messages(contact_id)
     msgs = store.get("messages") or []
-    msgs.append(event)
+    msgs.append({"direction": "inbound", "body": body})
     store["messages"] = msgs
-    save_message_store(store)
-
+    save_contact_messages(contact_id, store)
+    
+    
     return web.json_response({"ok": True})
 
 
@@ -219,11 +209,16 @@ async def handle_outbound_message(request: web.Request):
             return web.json_response({"ok": True, "dedup": True})
         PROCESSED_OUTBOUND_MESSAGES.add(wh_id)
 
-    store = load_outbound_message_store()
+    contact_id = event.get("contactId")
+    if not contact_id:
+        return web.json_response({"error": "missing contact id"}, status=422)
+    body = event.get("body")
+
+    store = load_contact_messages(contact_id)
     msgs = store.get("messages") or []
-    msgs.append(event)
+    msgs.append({"direction": "outbound", "body": body})
     store["messages"] = msgs
-    save_outbound_message_store(store)
+    save_contact_messages(contact_id, store)
 
     return web.json_response({"ok": True})
 
