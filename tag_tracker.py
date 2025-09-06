@@ -13,6 +13,7 @@ from aiohttp import web
 TAG_NAME = "ia/atendimento/ativa"
 STORE_PATH = Path("tag_ia_atendimento_ativa.json")
 MESSAGE_STORE_PATH = Path("inbound_messages.json")
+OUTBOUND_MESSAGE_STORE_PATH = Path("outbound_messages.json")
 PORT = 8081
 
 # Opcional: verificar assinatura RSA dos webhooks (requer 'cryptography')
@@ -37,6 +38,7 @@ T1hhTiaCeIY/OwwwNUY2yvcCAwEAAQ==
 # Memória (simples) para idempotência
 PROCESSED_TAGS = set()
 PROCESSED_MESSAGES = set()
+PROCESSED_OUTBOUND_MESSAGES = set()
 
 
 def now_iso():
@@ -57,6 +59,7 @@ def save_store(store):
     store["lastUpdate"] = now_iso()
     STORE_PATH.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
 
+
 def load_message_store():
     if MESSAGE_STORE_PATH.exists():
         try:
@@ -69,6 +72,22 @@ def load_message_store():
 def save_message_store(store):
     store["lastUpdate"] = now_iso()
     MESSAGE_STORE_PATH.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def load_outbound_message_store():
+    if OUTBOUND_MESSAGE_STORE_PATH.exists():
+        try:
+            return json.loads(OUTBOUND_MESSAGE_STORE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            logging.exception("Falha lendo o outbound store; recriando.")
+    return {"lastUpdate": now_iso(), "messages": []}
+
+
+def save_outbound_message_store(store):
+    store["lastUpdate"] = now_iso()
+    OUTBOUND_MESSAGE_STORE_PATH.write_text(
         json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
@@ -109,7 +128,6 @@ async def handle_list(_req):
             "lastUpdate": store["lastUpdate"],
         }
     )
-
 
 
 async def handle_contact_tag(request: web.Request):
@@ -183,6 +201,33 @@ async def handle_inbound_message(request: web.Request):
     return web.json_response({"ok": True})
 
 
+async def handle_outbound_message(request: web.Request):
+    raw = await request.read()
+
+    sig = request.headers.get("x-wh-signature") or request.headers.get("X-Wh-Signature")
+    if sig and not verify_signature(raw, sig):
+        return web.json_response({"error": "invalid signature"}, status=401)
+
+    try:
+        event = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    wh_id = event.get("webhookId")
+    if wh_id:
+        if wh_id in PROCESSED_OUTBOUND_MESSAGES:
+            return web.json_response({"ok": True, "dedup": True})
+        PROCESSED_OUTBOUND_MESSAGES.add(wh_id)
+
+    store = load_outbound_message_store()
+    msgs = store.get("messages") or []
+    msgs.append(event)
+    store["messages"] = msgs
+    save_outbound_message_store(store)
+
+    return web.json_response({"ok": True})
+
+
 def build_app():
     app = web.Application()
     app.add_routes(
@@ -191,6 +236,7 @@ def build_app():
             web.get("/contacts/ativa", handle_list),
             web.post("/webhooks/ghl/contact-tag", handle_contact_tag),
             web.post("/webhooks/ghl/inbound-message", handle_inbound_message),
+            web.post("/webhooks/ghl/outbound-message", handle_outbound_message),
         ]
     )
     return app
