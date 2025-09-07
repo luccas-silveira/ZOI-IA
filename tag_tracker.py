@@ -98,19 +98,26 @@ def load_location_token():
         logging.exception("Falha lendo location_token.json")
         return None
 
-async def fetch_existing_messages(contact_id: str):
+async def fetch_conversation_messages(conversation_id: str, limit: int = 30):
     token = load_location_token()
     if not token:
         return []
-    url = f"https://services.leadconnectorhq.com/conversations/{contact_id}"
-    headers = {"Authorization": f"Bearer {token}"}
+    url = (
+        f"https://services.leadconnectorhq.com/conversations/{conversation_id}/messages"
+        f"?limit={limit}"
+    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Version": "2021-04-15",
+    }
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(url, headers=headers, timeout=10)
             resp.raise_for_status()
             payload = resp.json()
     except Exception:
-        logging.exception("Falha buscando histórico de %s", contact_id)
+        logging.exception("Falha buscando mensagens da conversa %s", conversation_id)
         return []
 
     messages = []
@@ -118,7 +125,11 @@ async def fetch_existing_messages(contact_id: str):
         body = item.get("body") or item.get("text") or ""
         direction = item.get("direction") or item.get("messageDirection")
         direction = "outbound" if direction == "outbound" else "inbound"
-        messages.append({"direction": direction, "body": body})
+        messages.append({
+            "direction": direction,
+            "body": body,
+            "conversationId": conversation_id,
+        })
     return messages
 
 def verify_signature(payload_bytes: bytes, signature_b64: str) -> bool:
@@ -195,8 +206,13 @@ async def handle_contact_tag(request: web.Request):
         ids.add(contact_id)
         store["contactIds"] = sorted(ids)
         save_store(store)
-        history = await fetch_existing_messages(contact_id)
-        save_contact_messages(contact_id, {"messages": history})
+        msg_store = load_contact_messages(contact_id)
+        conversation_id = msg_store.get("conversationId")
+        if conversation_id:
+            history = await fetch_conversation_messages(conversation_id)
+            msg_store["messages"] = history
+            msg_store["historyFetched"] = True
+            save_contact_messages(contact_id, msg_store)
     elif not has_tag_now and had_tag:
         ids.discard(contact_id)
         store["contactIds"] = sorted(ids)
@@ -239,8 +255,16 @@ async def handle_inbound_message(request: web.Request):
     store = load_contact_messages(contact_id)
     if conversation_id is not None:
         store["conversationId"] = conversation_id
+        if not store.get("historyFetched"):
+            history = await fetch_conversation_messages(conversation_id)
+            store["messages"] = history
+            store["historyFetched"] = True
     msgs = store.get("messages") or []
-    msgs.append({"direction": "inbound", "body": body})
+    msgs.append({
+        "direction": "inbound",
+        "body": body,
+        "conversationId": conversation_id,
+    })
     store["messages"] = msgs
     save_contact_messages(contact_id, store)
 
@@ -273,8 +297,16 @@ async def handle_outbound_message(request: web.Request):
     store = load_contact_messages(contact_id)
     if conversation_id is not None:
         store["conversationId"] = conversation_id
+        if not store.get("historyFetched"):
+            history = await fetch_conversation_messages(conversation_id)
+            store["messages"] = history
+            store["historyFetched"] = True
     msgs = store.get("messages") or []
-    msgs.append({"direction": "outbound", "body": body})
+    msgs.append({
+        "direction": "outbound",
+        "body": body,
+        "conversationId": conversation_id,
+    })
     store["messages"] = msgs
     save_contact_messages(contact_id, store)
 

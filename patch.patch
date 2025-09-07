@@ -1,98 +1,105 @@
 diff --git a/tag_tracker.py b/tag_tracker.py
-index 4bd8d8d6ca4e1c238accc857b28aacaf82e0431a..b1fe69f1871fc53a31bf1f43619bf7ab36668df3 100644
+index 32a5acd420051707087ca1869653afb0c3572f29..8e44e0dbf3e057e71ba4a3b268d8bda217663e3b 100644
 --- a/tag_tracker.py
 +++ b/tag_tracker.py
-@@ -212,85 +212,91 @@ async def handle_contact_tag(request: web.Request):
+@@ -99,50 +99,100 @@ def load_location_token():
+         return None
  
-     return web.json_response({"ok": True, "present": has_tag_now})
+ async def fetch_existing_messages(contact_id: str):
+     token = load_location_token()
+     if not token:
+         return []
+     url = f"https://services.leadconnectorhq.com/conversations/{contact_id}"
+     headers = {"Authorization": f"Bearer {token}"}
+     try:
+         async with httpx.AsyncClient() as client:
+             resp = await client.get(url, headers=headers, timeout=10)
+             resp.raise_for_status()
+             payload = resp.json()
+     except Exception:
+         logging.exception("Falha buscando histórico de %s", contact_id)
+         return []
  
- async def handle_inbound_message(request: web.Request):
-     raw = await request.read()
+     messages = []
+     for item in payload.get("messages", []):
+         body = item.get("body") or item.get("text") or ""
+         direction = item.get("direction") or item.get("messageDirection")
+         direction = "outbound" if direction == "outbound" else "inbound"
+         messages.append({"direction": direction, "body": body})
+     return messages
  
-     sig = request.headers.get("x-wh-signature") or request.headers.get("X-Wh-Signature")
-     if sig and not verify_signature(raw, sig):
-         return web.json_response({"error": "invalid signature"}, status=401)
++
++async def fetch_conversation_messages(conversation_id: str):
++    token = load_location_token()
++    if not token:
++        return []
++    url = f"https://services.leadconnectorhq.com/conversations/{conversation_id}"
++    headers = {"Authorization": f"Bearer {token}"}
++    try:
++        async with httpx.AsyncClient() as client:
++            resp = await client.get(url, headers=headers, timeout=10)
++            resp.raise_for_status()
++            payload = resp.json()
++    except Exception:
++        logging.exception("Falha buscando mensagens da conversa %s", conversation_id)
++        return []
++
++    raw_messages = payload.get("messages")
++    messages_source = []
++    if isinstance(raw_messages, list):
++        messages_source = raw_messages
++    elif isinstance(raw_messages, dict):
++        messages_source = raw_messages.get("messages") or raw_messages.get("items") or []
++        if not isinstance(messages_source, list):
++            logging.warning(
++                "Formato inesperado de mensagens dentro do dict para conversa %s: %r",
++                conversation_id,
++                raw_messages,
++            )
++            messages_source = []
++    elif raw_messages is not None:
++        logging.warning(
++            "Formato inesperado para payload['messages'] da conversa %s: %r",
++            conversation_id,
++            raw_messages,
++        )
++        return []
++    else:
++        return []
++
++    messages = []
++    for item in messages_source:
++        if not isinstance(item, dict):
++            logging.warning("Item de mensagem inesperado: %r", item)
++            continue
++        body = item.get("body") or item.get("text") or ""
++        direction = item.get("direction") or item.get("messageDirection")
++        direction = "outbound" if direction == "outbound" else "inbound"
++        messages.append({"direction": direction, "body": body})
++    return messages
++
+ def verify_signature(payload_bytes: bytes, signature_b64: str) -> bool:
+     if not VERIFY_SIGNATURE:
+         return True
+     try:
+         from cryptography.hazmat.primitives.serialization import load_pem_public_key
+         from cryptography.hazmat.primitives.asymmetric import padding
+         from cryptography.hazmat.primitives import hashes
+     except Exception:
+         logging.warning("biblioteca 'cryptography' não instalada; pulando verificação de assinatura")
+         return True  # aceite, mas logue
  
      try:
-         event = json.loads(raw.decode("utf-8"))
-     except Exception:
-         return web.json_response({"error": "invalid json"}, status=400)
+         pub = load_pem_public_key(PUBLIC_KEY_PEM)
+         sig = base64.b64decode(signature_b64)
+         pub.verify(sig, payload_bytes, padding.PKCS1v15(), hashes.SHA256())
+         return True
+     except Exception as e:
+         logging.error("Assinatura inválida: %s", e)
+         return False
  
-     wh_id = event.get("webhookId")
-     if wh_id:
-         if wh_id in PROCESSED_MESSAGES:
-             return web.json_response({"ok": True, "dedup": True})
-         PROCESSED_MESSAGES.add(wh_id)
- 
-     contact_id = event.get("contactId")
-     if not contact_id:
-         return web.json_response({"error": "missing contact id"}, status=422)
-     body = event.get("body")
-+    conversation_id = event.get("conversationId")
- 
-     store = load_contact_messages(contact_id)
-+    if conversation_id is not None:
-+        store["conversationId"] = conversation_id
-     msgs = store.get("messages") or []
--    msgs.append({"direction": "inbound", "body": body})
-+    msgs.append({"direction": "inbound", "body": body, "conversationId": conversation_id})
-     store["messages"] = msgs
-     save_contact_messages(contact_id, store)
- 
+ async def handle_health(_req):
      return web.json_response({"ok": True})
  
- async def handle_outbound_message(request: web.Request):
-     raw = await request.read()
- 
-     sig = request.headers.get("x-wh-signature") or request.headers.get("X-Wh-Signature")
-     if sig and not verify_signature(raw, sig):
-         return web.json_response({"error": "invalid signature"}, status=401)
- 
-     try:
-         event = json.loads(raw.decode("utf-8"))
-     except Exception:
-         return web.json_response({"error": "invalid json"}, status=400)
- 
-     wh_id = event.get("webhookId")
-     if wh_id:
-         if wh_id in PROCESSED_OUTBOUND_MESSAGES:
-             return web.json_response({"ok": True, "dedup": True})
-         PROCESSED_OUTBOUND_MESSAGES.add(wh_id)
- 
-     contact_id = event.get("contactId")
-     if not contact_id:
-         return web.json_response({"error": "missing contact id"}, status=422)
-     body = event.get("body")
-+    conversation_id = event.get("conversationId")
- 
-     store = load_contact_messages(contact_id)
-+    if conversation_id is not None:
-+        store["conversationId"] = conversation_id
-     msgs = store.get("messages") or []
--    msgs.append({"direction": "outbound", "body": body})
-+    msgs.append({"direction": "outbound", "body": body, "conversationId": conversation_id})
-     store["messages"] = msgs
-     save_contact_messages(contact_id, store)
- 
-     return web.json_response({"ok": True})
- 
- def build_app():
-     app = web.Application()
-     app.add_routes(
-         [
-             web.get("/healthz", handle_health),
-             web.get("/contacts/ativa", handle_list),
-             web.post("/webhooks/ghl/contact-tag", handle_contact_tag),
-             web.post("/webhooks/ghl/inbound-message", handle_inbound_message),
-             web.post("/webhooks/ghl/outbound-message", handle_outbound_message),
-         ]
-     )
-     return app
- 
- def main():
-     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-     app = build_app()
-     web.run_app(app, port=PORT)
- 
- if __name__ == "__main__":
-     main()
+ async def handle_list(_req):
+     store = load_store()
