@@ -234,8 +234,11 @@ async def handle_inbound_message(request: web.Request):
     if not contact_id:
         return web.json_response({"error": "missing contact id"}, status=422)
     body = event.get("body")
+    conversation_id = event.get("conversationId")
 
     store = load_contact_messages(contact_id)
+    if conversation_id is not None:
+        store["conversationId"] = conversation_id
     msgs = store.get("messages") or []
     msgs.append({"direction": "inbound", "body": body})
     store["messages"] = msgs
@@ -265,8 +268,11 @@ async def handle_outbound_message(request: web.Request):
     if not contact_id:
         return web.json_response({"error": "missing contact id"}, status=422)
     body = event.get("body")
+    conversation_id = event.get("conversationId")
 
     store = load_contact_messages(contact_id)
+    if conversation_id is not None:
+        store["conversationId"] = conversation_id
     msgs = store.get("messages") or []
     msgs.append({"direction": "outbound", "body": body})
     store["messages"] = msgs
