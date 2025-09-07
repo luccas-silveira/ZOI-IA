@@ -90,16 +90,17 @@ async def update_context(store: dict, flush_all: bool = False) -> None:
         return
 
     if flush_all:
+        # Processa todas as mensagens, mantendo as mais recentes no início
         to_summarize = messages
         remaining = []
     else:
-        to_summarize = messages[:15]
-        remaining = messages[15:]
+        # Resume as mensagens mais antigas, localizadas ao final da lista
+        to_summarize = messages[-15:]
+        remaining = messages[:-15]
 
-    combined = []
+    combined = list(to_summarize)
     if context:
         combined.append({"direction": "context", "body": context})
-    combined.extend(to_summarize)
     store["context"] = await summarize(combined)
     store["messages"] = remaining
 
@@ -140,8 +141,10 @@ async def fetch_conversation_messages(conversation_id: str, limit: int = 30):
         logging.warning("Formato inesperado de mensagens: %r", raw_messages)
         return []
 
+    # A API retorna da mensagem mais antiga para a mais recente;
+    # invertemos para manter a mais nova no início da lista.
     messages = []
-    for item in raw_messages:
+    for item in reversed(raw_messages):
         if not isinstance(item, dict):
             logging.warning("Mensagem inesperada no payload: %r", item)
             continue
@@ -286,7 +289,7 @@ async def handle_inbound_message(request: web.Request):
             store["messages"] = history
             store["historyFetched"] = True
     msgs = store.get("messages") or []
-    msgs.append({
+    msgs.insert(0, {
         "direction": "inbound",
         "body": body,
         "conversationId": conversation_id,
@@ -330,7 +333,7 @@ async def handle_outbound_message(request: web.Request):
             store["messages"] = history
             store["historyFetched"] = True
     msgs = store.get("messages") or []
-    msgs.append({
+    msgs.insert(0, {
         "direction": "outbound",
         "body": body,
         "conversationId": conversation_id,

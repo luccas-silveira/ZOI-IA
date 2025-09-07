@@ -1,69 +1,217 @@
-diff --git a/summarizer.py b/summarizer.py
-index 47c1bc3a2f29588ff976a78cd0003137f09e852d..24532e8f4ab63b94f4b141ff4368d5325423c33b 100644
---- a/summarizer.py
-+++ b/summarizer.py
-@@ -1,55 +1,59 @@
- import asyncio
- import json
- import logging
- import os
- from typing import Dict, List
+diff --git a/tag_tracker.py b/tag_tracker.py
+index 66e76c8c16f666120fffc365ea296313db2ff63c..75f93a9aefa8f5e128bc9a7b3d772ede9688bfa0 100644
+--- a/tag_tracker.py
++++ b/tag_tracker.py
+@@ -68,102 +68,105 @@ def load_contact_messages(contact_id: str):
+             data.setdefault("messages", [])
+             data.setdefault("context", "")
+             return data
+         except Exception:
+             logging.exception("Falha lendo o histórico de %s; recriando.", contact_id)
+     return {"lastUpdate": now_iso(), "messages": [], "context": ""}
  
-+from cachetools import TTLCache
-+
- try:
-     from openai import AsyncOpenAI
- except Exception:  # pragma: no cover - fallback if openai not installed
-     AsyncOpenAI = None
+ def save_contact_messages(contact_id: str, store):
+     store["lastUpdate"] = now_iso()
+     store.setdefault("context", "")
+     MESSAGES_DIR.mkdir(exist_ok=True)
+     path = MESSAGES_DIR / f"{contact_id}.json"
+     path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
  
- try:
-     from transformers import pipeline  # type: ignore
- except Exception:  # pragma: no cover - fallback if transformers not installed
-     pipeline = None
- 
--# cache simples em memória para evitar custo repetido
--_CACHE: dict[str, str] = {}
-+# cache com expiração para evitar custo repetido
-+_CACHE = TTLCache(maxsize=128, ttl=3600)
- DEFAULT_MAX_MESSAGES = 50
- 
- async def summarize(messages: List[Dict[str, str]], max_messages: int = DEFAULT_MAX_MESSAGES, timeout: float = 10.0) -> str:
-     """Gera um resumo textual das mensagens."""
+ async def update_context(store: dict, flush_all: bool = False) -> None:
+     messages = store.get("messages") or []
      if not messages:
-         return ""
-     # Limita o histórico
-     msgs = messages[-max_messages:]
-+    _CACHE.expire()
-     key = json.dumps(msgs, ensure_ascii=False, sort_keys=True)
--    if key in _CACHE:
--        return _CACHE[key]
-+    cached = _CACHE.get(key)
-+    if cached is not None:
-+        return cached
-     text = "\n".join(f"{m.get('direction')}: {m.get('body')}" for m in msgs)
-     summary = text
+         return
+ 
+     context = store.get("context") or ""
+ 
+     if not flush_all and len(messages) < 30:
+         return
+ 
+     if flush_all:
++        # Processa todas as mensagens, mantendo as mais recentes no início
+         to_summarize = messages
+         remaining = []
+     else:
+-        to_summarize = messages[:15]
+-        remaining = messages[15:]
++        # Resume as mensagens mais antigas, localizadas ao final da lista
++        to_summarize = messages[-15:]
++        remaining = messages[:-15]
+ 
+-    combined = []
++    combined = list(to_summarize)
+     if context:
+         combined.append({"direction": "context", "body": context})
+-    combined.extend(to_summarize)
+     store["context"] = await summarize(combined)
+     store["messages"] = remaining
+ 
+ def load_location_token():
      try:
-         if AsyncOpenAI:
-             client = AsyncOpenAI()
-             resp = await asyncio.wait_for(
-                 client.chat.completions.create(
-                     model=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
-                     messages=[
-                         {"role": "system", "content": "Resuma a conversa de forma sucinta."},
-                         {"role": "user", "content": text},
-                     ],
-                 ),
-                 timeout=timeout,
-             )
-             summary = resp.choices[0].message.content.strip()
-         elif pipeline:
-             summarizer = pipeline("summarization")
-             result = await asyncio.to_thread(
-                 summarizer, text, max_length=60, min_length=10, do_sample=False
-             )
-             summary = result[0]["summary_text"].strip()
-     except Exception as exc:  # pragma: no cover - log e usa fallback
-         logging.exception("Falha ao resumir mensagens: %s", exc)
-     _CACHE[key] = summary
--    return summary
-+    return summary
+         data = json.loads(LOCATION_TOKEN_PATH.read_text(encoding="utf-8"))
+         return data.get("access_token")
+     except Exception:
+         logging.exception("Falha lendo location_token.json")
+         return None
+ 
+ async def fetch_conversation_messages(conversation_id: str, limit: int = 30):
+     token = load_location_token()
+     if not token:
+         return []
+     url = (
+         f"https://services.leadconnectorhq.com/conversations/{conversation_id}/messages"
+         f"?limit={limit}"
+     )
+     headers = {
+         "Authorization": f"Bearer {token}",
+         "Accept": "application/json",
+         "Version": "2021-04-15",
+     }
+     try:
+         async with httpx.AsyncClient() as client:
+             resp = await client.get(url, headers=headers, timeout=10)
+             resp.raise_for_status()
+             payload = resp.json()
+     except Exception:
+         logging.exception("Falha buscando mensagens da conversa %s", conversation_id)
+         return []
+ 
+     raw_messages = payload.get("messages", [])
+     if isinstance(raw_messages, dict):
+         raw_messages = raw_messages.get("messages", [])
+     if not isinstance(raw_messages, list):
+         logging.warning("Formato inesperado de mensagens: %r", raw_messages)
+         return []
+ 
++    # A API retorna da mensagem mais antiga para a mais recente;
++    # invertemos para manter a mais nova no início da lista.
+     messages = []
+-    for item in raw_messages:
++    for item in reversed(raw_messages):
+         if not isinstance(item, dict):
+             logging.warning("Mensagem inesperada no payload: %r", item)
+             continue
+         body = item.get("body") or item.get("text") or ""
+         direction = item.get("direction") or item.get("messageDirection")
+         direction = "outbound" if direction == "outbound" else "inbound"
+         messages.append({
+             "direction": direction,
+             "body": body,
+         })
+     return messages
+ 
+ def verify_signature(payload_bytes: bytes, signature_b64: str) -> bool:
+     if not VERIFY_SIGNATURE:
+         return True
+     try:
+         from cryptography.hazmat.primitives.serialization import load_pem_public_key
+         from cryptography.hazmat.primitives.asymmetric import padding
+         from cryptography.hazmat.primitives import hashes
+     except Exception:
+         logging.warning("biblioteca 'cryptography' não instalada; pulando verificação de assinatura")
+         return True  # aceite, mas logue
+ 
+     try:
+         pub = load_pem_public_key(PUBLIC_KEY_PEM)
+diff --git a/tag_tracker.py b/tag_tracker.py
+index 66e76c8c16f666120fffc365ea296313db2ff63c..75f93a9aefa8f5e128bc9a7b3d772ede9688bfa0 100644
+--- a/tag_tracker.py
++++ b/tag_tracker.py
+@@ -264,95 +267,95 @@ async def handle_inbound_message(request: web.Request):
+     try:
+         event = json.loads(raw.decode("utf-8"))
+     except Exception:
+         return web.json_response({"error": "invalid json"}, status=400)
+ 
+     wh_id = event.get("webhookId")
+     if wh_id:
+         if wh_id in PROCESSED_MESSAGES:
+             return web.json_response({"ok": True, "dedup": True})
+         PROCESSED_MESSAGES.add(wh_id)
+ 
+     contact_id = event.get("contactId")
+     if not contact_id:
+         return web.json_response({"error": "missing contact id"}, status=422)
+     body = event.get("body")
+     conversation_id = event.get("conversationId")
+ 
+     store = load_contact_messages(contact_id)
+     if conversation_id is not None:
+         store["conversationId"] = conversation_id
+         if not store.get("historyFetched"):
+             history = await fetch_conversation_messages(conversation_id)
+             store["messages"] = history
+             store["historyFetched"] = True
+     msgs = store.get("messages") or []
+-    msgs.append({
++    msgs.insert(0, {
+         "direction": "inbound",
+         "body": body,
+         "conversationId": conversation_id,
+     })
+     store["messages"] = msgs
+     if len(store["messages"]) >= 30:
+         await update_context(store)
+     save_contact_messages(contact_id, store)
+ 
+     return web.json_response({"ok": True})
+ 
+ async def handle_outbound_message(request: web.Request):
+     raw = await request.read()
+ 
+     sig = request.headers.get("x-wh-signature") or request.headers.get("X-Wh-Signature")
+     if sig and not verify_signature(raw, sig):
+         return web.json_response({"error": "invalid signature"}, status=401)
+ 
+     try:
+         event = json.loads(raw.decode("utf-8"))
+     except Exception:
+         return web.json_response({"error": "invalid json"}, status=400)
+ 
+     wh_id = event.get("webhookId")
+     if wh_id:
+         if wh_id in PROCESSED_OUTBOUND_MESSAGES:
+             return web.json_response({"ok": True, "dedup": True})
+         PROCESSED_OUTBOUND_MESSAGES.add(wh_id)
+ 
+     contact_id = event.get("contactId")
+     if not contact_id:
+         return web.json_response({"error": "missing contact id"}, status=422)
+     body = event.get("body")
+     conversation_id = event.get("conversationId")
+ 
+     store = load_contact_messages(contact_id)
+     if conversation_id is not None:
+         store["conversationId"] = conversation_id
+         if not store.get("historyFetched"):
+             history = await fetch_conversation_messages(conversation_id)
+             store["messages"] = history
+             store["historyFetched"] = True
+     msgs = store.get("messages") or []
+-    msgs.append({
++    msgs.insert(0, {
+         "direction": "outbound",
+         "body": body,
+         "conversationId": conversation_id,
+     })
+     store["messages"] = msgs
+     if len(store["messages"]) >= 30:
+         await update_context(store)
+     save_contact_messages(contact_id, store)
+ 
+     return web.json_response({"ok": True})
+ 
+ def build_app():
+     app = web.Application()
+     app.add_routes(
+         [
+             web.get("/healthz", handle_health),
+             web.get("/contacts/ativa", handle_list),
+             web.post("/webhooks/ghl/contact-tag", handle_contact_tag),
+             web.post("/webhooks/ghl/inbound-message", handle_inbound_message),
+             web.post("/webhooks/ghl/outbound-message", handle_outbound_message),
+         ]
+     )
+     return app
+ 
+ def main():

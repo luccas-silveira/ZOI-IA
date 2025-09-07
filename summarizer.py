@@ -24,8 +24,10 @@ async def summarize(messages: List[Dict[str, str]], max_messages: int = DEFAULT_
     """Gera um resumo textual das mensagens."""
     if not messages:
         return ""
-    # Limita o histórico
-    msgs = messages[-max_messages:]
+    # As mensagens são armazenadas com a mais recente primeiro;
+    # selecionamos somente as mais novas e reordenamos cronologicamente
+    # antes de gerar o resumo.
+    msgs = list(reversed(messages[:max_messages]))
     _CACHE.expire()
     key = json.dumps(msgs, ensure_ascii=False, sort_keys=True)
     cached = _CACHE.get(key)
