@@ -1,13 +1,134 @@
-diff --git a/.gitignore b/.gitignore
-index 24c4a6f45376d2d31dc39b61e162af373510b121..a6645367880fcd1ace3d6f09d99662b8d3bccdec 100644
---- a/.gitignore
-+++ b/.gitignore
-@@ -1,6 +1,7 @@
- messages/
- summaries/
- agency_token.json
- location_token.json
- tag_ia_atendimento_ativa.json
--patch.patch
-+patch.patch__pycache__/
-+*.pyc
+diff --git a/tag_tracker.py b/tag_tracker.py
+index 945d532e9a33863c0095667172c1e3ed8e633962..27ffa605117fe5efff753de445d606a910980db7 100644
+--- a/tag_tracker.py
++++ b/tag_tracker.py
+@@ -1,42 +1,36 @@
+-import asyncio
+ import base64
+ import json
+ import logging
+-import os
+ from datetime import datetime, timezone
+ from pathlib import Path
+ 
+ from aiohttp import web
+ import httpx
+ 
+ from summarizer import summarize
+-
+-try:  # pragma: no cover - openai é opcional
+-    from openai import AsyncOpenAI
+-except Exception:  # pragma: no cover
+-    AsyncOpenAI = None
++from ai_agent import generate_reply
+ 
+ # =========================
+ # Configurações
+ # =========================
+ TAG_NAME = "ia - ativa"
+ STORE_PATH = Path("tag_ia_atendimento_ativa.json")
+ MESSAGES_DIR = Path("messages")
+ LOCATION_TOKEN_PATH = Path("location_token.json")
+ PORT = 8081
+ 
+ # Opcional: verificar assinatura RSA dos webhooks (requer 'cryptography')
+ VERIFY_SIGNATURE = True
+ 
+ # Chave pública oficial (Webhook Authentication Guide)
+ PUBLIC_KEY_PEM = b"""-----BEGIN PUBLIC KEY-----
+ MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAokvo/r9tVgcfZ5DysOSC
+ Frm602qYV0MaAiNnX9O8KxMbiyRKWeL9JpCpVpt4XHIcBOK4u3cLSqJGOLaPuXw6
+ dO0t6Q/ZVdAV5Phz+ZtzPL16iCGeK9po6D6JHBpbi989mmzMryUnQJezlYJ3DVfB
+ csedpinheNnyYeFXolrJvcsjDtfAeRx5ByHQmTnSdFUzuAnC9/GepgLT9SM4nCpv
+ uxmZMxrJt5Rw+VUaQ9B8JSvbMPpez4peKaJPZHBbU3OdeCVx5klVXXZQGNHOs8gF
+ 3kvoV5rTnXV0IknLBXlcKKAQLZcY/Q9rG6Ifi9c+5vqlvHPCUJFT5XUGG5RKgOKU
+ J062fRtN+rLYZUV+BjafxQauvC8wSWeYja63VSUruvmNj8xkx2zE/Juc+yjLjTXp
+ IocmaiFeAO6fUtNjDeFVkhf5LNb59vECyrHD2SQIrhgXpO4Q3dVNA5rw576PwTzN
+ h/AMfHKIjE4xQA1SZuYJmNnmVZLIZBlQAF9Ntd03rfadZ+yDiOXCCs9FkHibELhC
+ HULgCsnuDJHcrGNd5/Ddm5hxGQ0ASitgHeMZ0kcIOwKDOzOU53lDza6/Y09T7sYJ
+diff --git a/tag_tracker.py b/tag_tracker.py
+index 945d532e9a33863c0095667172c1e3ed8e633962..27ffa605117fe5efff753de445d606a910980db7 100644
+--- a/tag_tracker.py
++++ b/tag_tracker.py
+@@ -152,81 +146,50 @@ async def fetch_conversation_messages(conversation_id: str, limit: int = 30):
+ 
+     raw_messages = payload.get("messages", [])
+     if isinstance(raw_messages, dict):
+         raw_messages = raw_messages.get("messages", [])
+     if not isinstance(raw_messages, list):
+         logging.warning("Formato inesperado de mensagens: %r", raw_messages)
+         return []
+ 
+     # A API retorna da mensagem mais antiga para a mais recente;
+     # invertemos para manter a mais nova no início da lista.
+     messages = []
+     for item in reversed(raw_messages):
+         if not isinstance(item, dict):
+             logging.warning("Mensagem inesperada no payload: %r", item)
+             continue
+         body = item.get("body") or item.get("text") or ""
+         direction = item.get("direction") or item.get("messageDirection")
+         direction = "outbound" if direction == "outbound" else "inbound"
+         messages.append({
+             "direction": direction,
+             "body": body,
+         })
+     return messages
+ 
+ 
+-async def generate_reply(store: dict) -> str:
+-    """Gera uma resposta utilizando o contexto e a última mensagem recebida."""
+-    context = store.get("context") or ""
+-    last_inbound = ""
+-    for msg in store.get("messages", []):
+-        if msg.get("direction") == "inbound":
+-            last_inbound = msg.get("body", "")
+-            break
+-    if not last_inbound:
+-        return ""
+-    if AsyncOpenAI is None:
+-        return ""
+-    prompt = f"Contexto:\n{context}\n\nMensagem:\n{last_inbound}"
+-    try:
+-        client = AsyncOpenAI()
+-        resp = await client.chat.completions.create(
+-            model=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
+-            messages=[
+-                {
+-                    "role": "system",
+-                    "content": "Você é um assistente que responde de forma educada.",
+-                },
+-                {"role": "user", "content": prompt},
+-            ],
+-        )
+-        return resp.choices[0].message.content.strip()
+-    except Exception as exc:  # pragma: no cover
+-        logging.exception("Falha gerando resposta: %s", exc)
+-        return ""
+-
+-
+ async def send_outbound_message(contact_id: str, conversation_id: str, body: str) -> bool:
+     """Envia uma mensagem para o contato informado."""
+     token, location_id = load_location_credentials()
+     if not token or not contact_id or not location_id:
+         return False
+     url = "https://services.leadconnectorhq.com/conversations/messages"
+     headers = {
+         "Authorization": f"Bearer {token}",
+         "Content-Type": "application/json",
+         "Accept": "application/json",
+         "Version": "2021-07-28",
+     }
+     payload = {
+         "locationId": location_id,
+         "contactId": contact_id,
+         "message": body,
+         "type": "SMS",
+     }
+     if conversation_id:
+         payload["conversationId"] = conversation_id
+     try:
+         async with httpx.AsyncClient() as client:
+             resp = await client.post(url, headers=headers, json=payload, timeout=10)
+             resp.raise_for_status()
+             AI_GENERATED_MESSAGES.add((conversation_id, body))

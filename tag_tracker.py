@@ -1,8 +1,6 @@
-import asyncio
 import base64
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,39 +8,19 @@ from aiohttp import web
 import httpx
 
 from summarizer import summarize
-
-try:  # pragma: no cover - openai é opcional
-    from openai import AsyncOpenAI
-except Exception:  # pragma: no cover
-    AsyncOpenAI = None
-
+from ai_agent import generate_reply
+from config import (
+    TAG_NAME,
+    STORE_PATH,
+    MESSAGES_DIR,
+    LOCATION_TOKEN_PATH,
+    PORT,
+    VERIFY_SIGNATURE,
+    PUBLIC_KEY_PEM,
+)
 # =========================
 # Configurações
 # =========================
-TAG_NAME = "ia - ativa"
-STORE_PATH = Path("tag_ia_atendimento_ativa.json")
-MESSAGES_DIR = Path("messages")
-LOCATION_TOKEN_PATH = Path("location_token.json")
-PORT = 8081
-
-# Opcional: verificar assinatura RSA dos webhooks (requer 'cryptography')
-VERIFY_SIGNATURE = True
-
-# Chave pública oficial (Webhook Authentication Guide)
-PUBLIC_KEY_PEM = b"""-----BEGIN PUBLIC KEY-----
-MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAokvo/r9tVgcfZ5DysOSC
-Frm602qYV0MaAiNnX9O8KxMbiyRKWeL9JpCpVpt4XHIcBOK4u3cLSqJGOLaPuXw6
-dO0t6Q/ZVdAV5Phz+ZtzPL16iCGeK9po6D6JHBpbi989mmzMryUnQJezlYJ3DVfB
-csedpinheNnyYeFXolrJvcsjDtfAeRx5ByHQmTnSdFUzuAnC9/GepgLT9SM4nCpv
-uxmZMxrJt5Rw+VUaQ9B8JSvbMPpez4peKaJPZHBbU3OdeCVx5klVXXZQGNHOs8gF
-3kvoV5rTnXV0IknLBXlcKKAQLZcY/Q9rG6Ifi9c+5vqlvHPCUJFT5XUGG5RKgOKU
-J062fRtN+rLYZUV+BjafxQauvC8wSWeYja63VSUruvmNj8xkx2zE/Juc+yjLjTXp
-IocmaiFeAO6fUtNjDeFVkhf5LNb59vECyrHD2SQIrhgXpO4Q3dVNA5rw576PwTzN
-h/AMfHKIjE4xQA1SZuYJmNnmVZLIZBlQAF9Ntd03rfadZ+yDiOXCCs9FkHibELhC
-HULgCsnuDJHcrGNd5/Ddm5hxGQ0ASitgHeMZ0kcIOwKDOzOU53lDza6/Y09T7sYJ
-PQe7z0cvj7aE4B+Ax1ZoZGPzpJlZtGXCsu9aTEGEnKzmsFqwcSsnw3JB31IGKAyk
-T1hhTiaCeIY/OwwwNUY2yvcCAwEAAQ==
------END PUBLIC KEY-----"""
 
 # Memória (simples) para idempotência
 PROCESSED_TAGS = set()
@@ -64,10 +42,12 @@ def load_store():
 
 def save_store(store):
     store["lastUpdate"] = now_iso()
+    # garante que a pasta do arquivo existe (ex.: data/)
+    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STORE_PATH.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def load_contact_messages(contact_id: str):
-    MESSAGES_DIR.mkdir(exist_ok=True)
+    MESSAGES_DIR.mkdir(parents=True, exist_ok=True)
     path = MESSAGES_DIR / f"{contact_id}.json"
     if path.exists():
         try:
@@ -82,7 +62,7 @@ def load_contact_messages(contact_id: str):
 def save_contact_messages(contact_id: str, store):
     store["lastUpdate"] = now_iso()
     store.setdefault("context", "")
-    MESSAGES_DIR.mkdir(exist_ok=True)
+    MESSAGES_DIR.mkdir(parents=True, exist_ok=True)
     path = MESSAGES_DIR / f"{contact_id}.json"
     path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -172,37 +152,6 @@ async def fetch_conversation_messages(conversation_id: str, limit: int = 30):
             "body": body,
         })
     return messages
-
-
-async def generate_reply(store: dict) -> str:
-    """Gera uma resposta utilizando o contexto e a última mensagem recebida."""
-    context = store.get("context") or ""
-    last_inbound = ""
-    for msg in store.get("messages", []):
-        if msg.get("direction") == "inbound":
-            last_inbound = msg.get("body", "")
-            break
-    if not last_inbound:
-        return ""
-    if AsyncOpenAI is None:
-        return ""
-    prompt = f"Contexto:\n{context}\n\nMensagem:\n{last_inbound}"
-    try:
-        client = AsyncOpenAI()
-        resp = await client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Você é um assistente que responde de forma educada.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as exc:  # pragma: no cover
-        logging.exception("Falha gerando resposta: %s", exc)
-        return ""
 
 
 async def send_outbound_message(contact_id: str, conversation_id: str, body: str) -> bool:

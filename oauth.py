@@ -158,8 +158,8 @@ SCOPES = [
 ]
 
 # Onde salvar tokens
-TOKEN_PATH = Path("agency_token.json")
-LOCATION_TOKEN_PATH = Path("location_token.json")
+TOKEN_PATH = Path("data/agency_token.json")
+LOCATION_TOKEN_PATH = Path("data/location_token.json")
 # Header de versão exigido por diversas rotas do GHL
 GHL_API_VERSION = "2021-07-28"
 
@@ -358,7 +358,8 @@ async def run_oauth_flow(
             redirect_uri=redirect_uri,
         )
 
-    # salva em agency_token.json (pode ser token de Location ou de Company, dependendo da instalação)
+    # salva em data/agency_token.json (pode ser token de Location ou de Company, dependendo da instalação)
+    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
     TOKEN_PATH.write_text(json.dumps(asdict(tokens), indent=2, ensure_ascii=False))
     print(f"✅ Tokens salvos em: {TOKEN_PATH.resolve()}")
 
@@ -426,6 +427,7 @@ async def run_oauth_flow(
                     return
 
             # Salva o token de Location
+            LOCATION_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
             LOCATION_TOKEN_PATH.write_text(json.dumps(asdict(loc_tokens), indent=2, ensure_ascii=False))
             print(f"\n✅ Token da Location salvo em: {LOCATION_TOKEN_PATH.resolve()}")
 

@@ -5,17 +5,18 @@ Ele contém scripts para execução do fluxo OAuth da API, rastreamento de tags 
 
 ## Arquivos locais
 
-Os scripts deste repositório criam alguns arquivos de uso local que contêm credenciais ou estado temporário e não devem ser versionados.
+Os scripts deste repositório criam alguns arquivos de uso local que contêm credenciais ou estado temporário e não devem ser versionados. Todos ficam centralizados na pasta `data/`.
 
-- `agency_token.json` e `location_token.json` são gerados pelo fluxo de autenticação em `oauth.py`. Execute `python oauth.py` para obter novos tokens; os arquivos serão gravados na raiz do projeto.
-- `tag_ia_atendimento_ativa.json` é criado por `tag_tracker.py` e armazena os contatos já processados pela tag "ia - ativa".
+- `data/agency_token.json` e `data/location_token.json` são gerados pelo fluxo de autenticação em `oauth.py`. Execute `python oauth.py` para obter novos tokens; os arquivos serão gravados em `data/`.
+- `data/tag_ia_atendimento_ativa.json` é criado por `tag_tracker.py` e armazena os contatos já processados pela tag "ia - ativa".
+- `data/messages/` contém o histórico de mensagens por contato.
 - `patch.patch` pode ser usado para guardar ajustes temporários com `git apply` e não faz parte do código fonte.
 
-Mantenha esses arquivos apenas localmente. Caso sejam removidos ou expirem, basta executar novamente os scripts correspondentes para regenerá-los. O arquivo `.gitignore` garante que eles permaneçam fora do controle de versão.
+Mantenha esses arquivos apenas localmente. Caso sejam removidos ou expirem, basta executar novamente os scripts correspondentes para regenerá-los. O `.gitignore` já ignora toda a pasta `data/`.
 
 ## Módulos
 
-- **`oauth.py`** – executa o fluxo OAuth do GoHighLevel e salva os tokens em `agency_token.json` e `location_token.json` para futuras chamadas de API.
+- **`oauth.py`** – executa o fluxo OAuth do GoHighLevel e salva os tokens em `data/agency_token.json` e `data/location_token.json` para futuras chamadas de API.
 - **`tag_tracker.py`** – servidor assíncrono que consome webhooks do GoHighLevel, armazena mensagens das conversas e mantém um resumo contextual das interações.
 - **`summarizer.py`** – função utilitária que gera um resumo textual das mensagens recebidas, utilizando `OPENAI_MODEL` ou um pipeline do Hugging Face.
 
@@ -31,7 +32,7 @@ pip install -r requirements.txt
    - `OPENAI_API_KEY`: chave para a API da OpenAI.
    - `OPENAI_MODEL`: modelo a ser usado no resumo (ex.: `gpt-3.5-turbo`).
 2. **Tokens do GoHighLevel**
-   - Execute `python oauth.py` e informe `GHL_CLIENT_ID` e `GHL_CLIENT_SECRET` para gerar `agency_token.json` e `location_token.json`.
+   - Execute `python oauth.py` e informe `GHL_CLIENT_ID` e `GHL_CLIENT_SECRET` para gerar `data/agency_token.json` e `data/location_token.json`.
 
 ## Exemplos de execução
 
@@ -51,7 +52,7 @@ PY
 ```bash
 python oauth.py
 ```
-Siga as instruções na tela; ao finalizar, os tokens serão salvos em `agency_token.json` e `location_token.json`.
+Siga as instruções na tela; ao finalizar, os tokens serão salvos em `data/agency_token.json` e `data/location_token.json`.
 
 ### Servidor de webhooks
 
