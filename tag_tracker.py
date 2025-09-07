@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,6 +10,11 @@ from aiohttp import web
 import httpx
 
 from summarizer import summarize
+
+try:  # pragma: no cover - openai é opcional
+    from openai import AsyncOpenAI
+except Exception:  # pragma: no cover
+    AsyncOpenAI = None
 
 # =========================
 # Configurações
@@ -42,6 +48,7 @@ T1hhTiaCeIY/OwwwNUY2yvcCAwEAAQ==
 PROCESSED_TAGS = set()
 PROCESSED_MESSAGES = set()
 PROCESSED_OUTBOUND_MESSAGES = set()
+AI_GENERATED_MESSAGES = set()
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -112,6 +119,15 @@ def load_location_token():
         logging.exception("Falha lendo location_token.json")
         return None
 
+def load_location_credentials():
+    """Retorna o access token e o location id."""
+    try:
+        data = json.loads(LOCATION_TOKEN_PATH.read_text(encoding="utf-8"))
+        return data.get("access_token"), data.get("location_id")
+    except Exception:
+        logging.exception("Falha lendo location_token.json")
+        return None, None
+
 async def fetch_conversation_messages(conversation_id: str, limit: int = 30):
     token = load_location_token()
     if not token:
@@ -156,6 +172,70 @@ async def fetch_conversation_messages(conversation_id: str, limit: int = 30):
             "body": body,
         })
     return messages
+
+
+async def generate_reply(store: dict) -> str:
+    """Gera uma resposta utilizando o contexto e a última mensagem recebida."""
+    context = store.get("context") or ""
+    last_inbound = ""
+    for msg in store.get("messages", []):
+        if msg.get("direction") == "inbound":
+            last_inbound = msg.get("body", "")
+            break
+    if not last_inbound:
+        return ""
+    if AsyncOpenAI is None:
+        return ""
+    prompt = f"Contexto:\n{context}\n\nMensagem:\n{last_inbound}"
+    try:
+        client = AsyncOpenAI()
+        resp = await client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Você é um assistente que responde de forma educada.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as exc:  # pragma: no cover
+        logging.exception("Falha gerando resposta: %s", exc)
+        return ""
+
+
+async def send_outbound_message(contact_id: str, conversation_id: str, body: str) -> bool:
+    """Envia uma mensagem para o contato informado."""
+    token, location_id = load_location_credentials()
+    if not token or not contact_id or not location_id:
+        return False
+    url = "https://services.leadconnectorhq.com/conversations/messages"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Version": "2021-07-28",
+    }
+    payload = {
+        "locationId": location_id,
+        "contactId": contact_id,
+        "message": body,
+        "type": "SMS",
+    }
+    if conversation_id:
+        payload["conversationId"] = conversation_id
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, headers=headers, json=payload, timeout=10)
+            resp.raise_for_status()
+            AI_GENERATED_MESSAGES.add((conversation_id, body))
+            return True
+    except httpx.HTTPStatusError as exc:  # pragma: no cover
+        logging.error("Erro HTTP %s: %s", exc.response.status_code, exc.response.text)
+    except Exception:  # pragma: no cover
+        logging.exception("Falha enviando mensagem para %s", contact_id)
+    return False
 
 def verify_signature(payload_bytes: bytes, signature_b64: str) -> bool:
     if not VERIFY_SIGNATURE:
@@ -299,6 +379,23 @@ async def handle_inbound_message(request: web.Request):
         await update_context(store)
     save_contact_messages(contact_id, store)
 
+    store_tags = load_store()
+    if contact_id in set(store_tags.get("contactIds") or []):
+        reply = await generate_reply(store)
+        if reply:
+            ok = await send_outbound_message(contact_id, conversation_id, reply)
+            if ok:
+                msgs = store.get("messages") or []
+                msgs.insert(0, {
+                    "direction": "outbound",
+                    "body": reply,
+                    "conversationId": conversation_id,
+                })
+                store["messages"] = msgs
+                if len(store["messages"]) >= 30:
+                    await update_context(store)
+                save_contact_messages(contact_id, store)
+
     return web.json_response({"ok": True})
 
 async def handle_outbound_message(request: web.Request):
@@ -324,6 +421,10 @@ async def handle_outbound_message(request: web.Request):
         return web.json_response({"error": "missing contact id"}, status=422)
     body = event.get("body")
     conversation_id = event.get("conversationId")
+
+    if (conversation_id, body) in AI_GENERATED_MESSAGES:
+        AI_GENERATED_MESSAGES.discard((conversation_id, body))
+        return web.json_response({"ok": True, "ignored": True})
 
     store = load_contact_messages(contact_id)
     if conversation_id is not None:
