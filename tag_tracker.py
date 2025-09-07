@@ -452,9 +452,9 @@ def build_app():
         [
             web.get("/healthz", handle_health),
             web.get("/contacts/ativa", handle_list),
-            web.post("/webhooks/ghl/contact-tag", handle_contact_tag),
-            web.post("/webhooks/ghl/inbound-message", handle_inbound_message),
-            web.post("/webhooks/ghl/outbound-message", handle_outbound_message),
+            web.post("/webhooks/contact-tag", handle_contact_tag),
+            web.post("/webhooks/inbound-message", handle_inbound_message),
+            web.post("/webhooks/outbound-message", handle_outbound_message),
         ]
     )
     return app
