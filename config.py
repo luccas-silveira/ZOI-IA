@@ -45,3 +45,8 @@ T1hhTiaCeIY/OwwwNUY2yvcCAwEAAQ==
 GHL_API_URL: str = os.getenv("GHL_API_URL", "https://services.leadconnectorhq.com")
 GHL_MESSAGES_LIST_VERSION: str = os.getenv("GHL_MESSAGES_LIST_VERSION", "2021-04-15")
 GHL_MESSAGES_WRITE_VERSION: str = os.getenv("GHL_MESSAGES_WRITE_VERSION", "2021-07-28")
+
+# HTTP client behavior
+HTTP_TIMEOUT: float = float(os.getenv("HTTP_TIMEOUT", "10"))
+HTTP_MAX_RETRIES: int = int(os.getenv("HTTP_MAX_RETRIES", "3"))
+HTTP_BACKOFF_BASE: float = float(os.getenv("HTTP_BACKOFF_BASE", "0.5"))

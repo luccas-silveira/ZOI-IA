@@ -1,190 +1,29 @@
 import base64
 import json
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
-
 from aiohttp import web
-import httpx
 
-from summarizer import summarize
 from ai_agent import generate_reply
-from config import (
-    TAG_NAME,
-    STORE_PATH,
-    MESSAGES_DIR,
-    LOCATION_TOKEN_PATH,
-    PORT,
-    VERIFY_SIGNATURE,
-    PUBLIC_KEY_PEM,
+from config import TAG_NAME, PORT, VERIFY_SIGNATURE, PUBLIC_KEY_PEM
+from storage import (
+    load_store,
+    save_store,
+    load_contact_messages,
+    save_contact_messages,
 )
+from clients.ghl_client import (
+    fetch_conversation_messages,
+    send_outbound_message,
+)
+from services.context_service import update_context
 # =========================
 # Configurações
 # =========================
 
-# Memória (simples) para idempotência
 PROCESSED_TAGS = set()
 PROCESSED_MESSAGES = set()
 PROCESSED_OUTBOUND_MESSAGES = set()
 AI_GENERATED_MESSAGES = set()
-
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
-
-def load_store():
-    if STORE_PATH.exists():
-        try:
-            return json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            logging.exception("Falha lendo o store; recriando.")
-    # Apenas IDs
-    return {"lastUpdate": now_iso(), "contactIds": []}
-
-def save_store(store):
-    store["lastUpdate"] = now_iso()
-    # garante que a pasta do arquivo existe (ex.: data/)
-    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STORE_PATH.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
-
-def load_contact_messages(contact_id: str):
-    MESSAGES_DIR.mkdir(parents=True, exist_ok=True)
-    path = MESSAGES_DIR / f"{contact_id}.json"
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            data.setdefault("messages", [])
-            data.setdefault("context", "")
-            return data
-        except Exception:
-            logging.exception("Falha lendo o histórico de %s; recriando.", contact_id)
-    return {"lastUpdate": now_iso(), "messages": [], "context": ""}
-
-def save_contact_messages(contact_id: str, store):
-    store["lastUpdate"] = now_iso()
-    store.setdefault("context", "")
-    MESSAGES_DIR.mkdir(parents=True, exist_ok=True)
-    path = MESSAGES_DIR / f"{contact_id}.json"
-    path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
-
-async def update_context(store: dict, flush_all: bool = False) -> None:
-    messages = store.get("messages") or []
-    if not messages:
-        return
-
-    context = store.get("context") or ""
-
-    if not flush_all and len(messages) < 30:
-        return
-
-    if flush_all:
-        # Processa todas as mensagens, mantendo as mais recentes no início
-        to_summarize = messages
-        remaining = []
-    else:
-        # Resume as mensagens mais antigas, localizadas ao final da lista
-        to_summarize = messages[-15:]
-        remaining = messages[:-15]
-
-    combined = list(to_summarize)
-    if context:
-        combined.append({"direction": "context", "body": context})
-    store["context"] = await summarize(combined)
-    store["messages"] = remaining
-
-def load_location_token():
-    try:
-        data = json.loads(LOCATION_TOKEN_PATH.read_text(encoding="utf-8"))
-        return data.get("access_token")
-    except Exception:
-        logging.exception("Falha lendo location_token.json")
-        return None
-
-def load_location_credentials():
-    """Retorna o access token e o location id."""
-    try:
-        data = json.loads(LOCATION_TOKEN_PATH.read_text(encoding="utf-8"))
-        return data.get("access_token"), data.get("location_id")
-    except Exception:
-        logging.exception("Falha lendo location_token.json")
-        return None, None
-
-async def fetch_conversation_messages(conversation_id: str, limit: int = 30):
-    token = load_location_token()
-    if not token:
-        return []
-    url = (
-        f"https://services.leadconnectorhq.com/conversations/{conversation_id}/messages"
-        f"?limit={limit}"
-    )
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        "Version": "2021-04-15",
-    }
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=headers, timeout=10)
-            resp.raise_for_status()
-            payload = resp.json()
-    except Exception:
-        logging.exception("Falha buscando mensagens da conversa %s", conversation_id)
-        return []
-
-    raw_messages = payload.get("messages", [])
-    if isinstance(raw_messages, dict):
-        raw_messages = raw_messages.get("messages", [])
-    if not isinstance(raw_messages, list):
-        logging.warning("Formato inesperado de mensagens: %r", raw_messages)
-        return []
-
-    # A API retorna da mensagem mais antiga para a mais recente;
-    # invertemos para manter a mais nova no início da lista.
-    messages = []
-    for item in reversed(raw_messages):
-        if not isinstance(item, dict):
-            logging.warning("Mensagem inesperada no payload: %r", item)
-            continue
-        body = item.get("body") or item.get("text") or ""
-        direction = item.get("direction") or item.get("messageDirection")
-        direction = "outbound" if direction == "outbound" else "inbound"
-        messages.append({
-            "direction": direction,
-            "body": body,
-        })
-    return messages
-
-
-async def send_outbound_message(contact_id: str, conversation_id: str, body: str) -> bool:
-    """Envia uma mensagem para o contato informado."""
-    token, location_id = load_location_credentials()
-    if not token or not contact_id or not location_id:
-        return False
-    url = "https://services.leadconnectorhq.com/conversations/messages"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Version": "2021-07-28",
-    }
-    payload = {
-        "locationId": location_id,
-        "contactId": contact_id,
-        "message": body,
-        "type": "SMS",
-    }
-    if conversation_id:
-        payload["conversationId"] = conversation_id
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, headers=headers, json=payload, timeout=10)
-            resp.raise_for_status()
-            AI_GENERATED_MESSAGES.add((conversation_id, body))
-            return True
-    except httpx.HTTPStatusError as exc:  # pragma: no cover
-        logging.error("Erro HTTP %s: %s", exc.response.status_code, exc.response.text)
-    except Exception:  # pragma: no cover
-        logging.exception("Falha enviando mensagem para %s", contact_id)
-    return False
 
 def verify_signature(payload_bytes: bytes, signature_b64: str) -> bool:
     if not VERIFY_SIGNATURE:
@@ -334,6 +173,7 @@ async def handle_inbound_message(request: web.Request):
         if reply:
             ok = await send_outbound_message(contact_id, conversation_id, reply)
             if ok:
+                AI_GENERATED_MESSAGES.add((conversation_id, reply))
                 msgs = store.get("messages") or []
                 msgs.insert(0, {
                     "direction": "outbound",

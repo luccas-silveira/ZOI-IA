@@ -16,9 +16,12 @@ Mantenha esses arquivos apenas localmente. Caso sejam removidos ou expirem, bast
 
 ## Módulos
 
-- **`oauth.py`** – executa o fluxo OAuth do GoHighLevel e salva os tokens em `data/agency_token.json` e `data/location_token.json` para futuras chamadas de API.
-- **`tag_tracker.py`** – servidor assíncrono que consome webhooks do GoHighLevel, armazena mensagens das conversas e mantém um resumo contextual das interações.
-- **`summarizer.py`** – função utilitária que gera um resumo textual das mensagens recebidas, utilizando `OPENAI_MODEL` ou um pipeline do Hugging Face.
+- `oauth.py` – executa o fluxo OAuth do GoHighLevel e salva os tokens em `data/agency_token.json` e `data/location_token.json` para futuras chamadas de API.
+- `tag_tracker.py` – servidor assíncrono que consome webhooks do GoHighLevel; usa `storage` e `clients/ghl_client` e mantém um resumo contextual das interações.
+- `summarizer.py` – função utilitária que gera um resumo textual das mensagens recebidas, utilizando `OPENAI_MODEL` ou um pipeline do Hugging Face.
+- `storage.py` – I/O local (store, mensagens por contato, tokens) centralizado em `data/`.
+- `clients/ghl_client.py` – cliente HTTP para GoHighLevel (listar mensagens de conversas e enviar respostas).
+- `services/context_service.py` – regra de atualização/compactação do contexto a partir do histórico.
 
 ## Instalação
 
@@ -64,7 +67,17 @@ O servidor (porta padrão `8081`) expõe:
 - `GET /contacts/ativa`
 - `POST /webhooks/ghl/contact-tag`
 - `POST /webhooks/ghl/inbound-message`
-- `POST /webhooks/ghl/outbound-message`
+ - `POST /webhooks/ghl/outbound-message`
+
+## Desenvolvimento
+
+- Dependências de desenvolvimento em `requirements-dev.txt` (pytest, pytest-asyncio).
+- Rodar testes:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
 
 ## Fluxo OAuth e uso dos tokens
 
