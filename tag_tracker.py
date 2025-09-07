@@ -8,10 +8,12 @@ from pathlib import Path
 from aiohttp import web
 import httpx
 
+from summarizer import summarize
+
 # =========================
 # Configurações
 # =========================
-TAG_NAME = "ia/atendimento/ativa"
+TAG_NAME = "ia - ativa"
 STORE_PATH = Path("tag_ia_atendimento_ativa.json")
 MESSAGES_DIR = Path("messages")
 SUMMARIES_DIR = Path("summaries")
@@ -63,13 +65,17 @@ def load_contact_messages(contact_id: str):
     path = MESSAGES_DIR / f"{contact_id}.json"
     if path.exists():
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data.setdefault("messages", [])
+            data.setdefault("context", "")
+            return data
         except Exception:
             logging.exception("Falha lendo o histórico de %s; recriando.", contact_id)
-    return {"lastUpdate": now_iso(), "messages": []}
+    return {"lastUpdate": now_iso(), "messages": [], "context": ""}
 
 def save_contact_messages(contact_id: str, store):
     store["lastUpdate"] = now_iso()
+    store.setdefault("context", "")
     MESSAGES_DIR.mkdir(exist_ok=True)
     path = MESSAGES_DIR / f"{contact_id}.json"
     path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -221,6 +227,7 @@ async def handle_contact_tag(request: web.Request):
             history = await fetch_conversation_messages(conversation_id)
             msg_store["messages"] = history
             msg_store["historyFetched"] = True
+            msg_store["context"] = await summarize(msg_store["messages"])
             save_contact_messages(contact_id, msg_store)
     elif not has_tag_now and had_tag:
         ids.discard(contact_id)
@@ -275,6 +282,7 @@ async def handle_inbound_message(request: web.Request):
         "conversationId": conversation_id,
     })
     store["messages"] = msgs
+    store["context"] = await summarize(store["messages"])
     save_contact_messages(contact_id, store)
 
     return web.json_response({"ok": True})
@@ -317,6 +325,7 @@ async def handle_outbound_message(request: web.Request):
         "conversationId": conversation_id,
     })
     store["messages"] = msgs
+    store["context"] = await summarize(store["messages"])
     save_contact_messages(contact_id, store)
 
     return web.json_response({"ok": True})
