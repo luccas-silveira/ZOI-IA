@@ -1,14 +1,21 @@
 import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, Tuple, Optional
 
-from config import STORE_PATH, MESSAGES_DIR, LOCATION_TOKEN_PATH
+from pathlib import Path
+from .config import STORE_PATH, MESSAGES_DIR, LOCATION_TOKEN_PATH
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _atomic_write(path: Path, data: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(data, encoding="utf-8")
+    tmp.replace(path)
 
 
 def load_store() -> Dict[str, Any]:
@@ -22,10 +29,8 @@ def load_store() -> Dict[str, Any]:
 
 def save_store(store: Dict[str, Any]) -> None:
     store["lastUpdate"] = _now_iso()
-    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STORE_PATH.write_text(
-        json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    payload = json.dumps(store, ensure_ascii=False, indent=2)
+    _atomic_write(STORE_PATH, payload)
 
 
 def load_contact_messages(contact_id: str) -> Dict[str, Any]:
@@ -45,11 +50,9 @@ def load_contact_messages(contact_id: str) -> Dict[str, Any]:
 def save_contact_messages(contact_id: str, store: Dict[str, Any]) -> None:
     store["lastUpdate"] = _now_iso()
     store.setdefault("context", "")
-    MESSAGES_DIR.mkdir(parents=True, exist_ok=True)
     path = MESSAGES_DIR / f"{contact_id}.json"
-    path.write_text(
-        json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    payload = json.dumps(store, ensure_ascii=False, indent=2)
+    _atomic_write(path, payload)
 
 
 def load_location_token() -> Optional[str]:
@@ -62,7 +65,6 @@ def load_location_token() -> Optional[str]:
 
 
 def load_location_credentials() -> Tuple[Optional[str], Optional[str]]:
-    """Retorna o access token e o location id."""
     try:
         data = json.loads(LOCATION_TOKEN_PATH.read_text(encoding="utf-8"))
         return data.get("access_token"), data.get("location_id")

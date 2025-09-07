@@ -8,25 +8,23 @@ from cachetools import TTLCache
 
 try:
     from openai import AsyncOpenAI
-except Exception:  # pragma: no cover - fallback if openai not installed
+except Exception:  # pragma: no cover - fallback se openai não instalado
     AsyncOpenAI = None
 
 try:
     from transformers import pipeline  # type: ignore
-except Exception:  # pragma: no cover - fallback if transformers not installed
+except Exception:  # pragma: no cover - fallback se transformers não instalado
     pipeline = None
 
 # cache com expiração para evitar custo repetido
 _CACHE = TTLCache(maxsize=128, ttl=3600)
 DEFAULT_MAX_MESSAGES = 50
 
+
 async def summarize(messages: List[Dict[str, str]], max_messages: int = DEFAULT_MAX_MESSAGES, timeout: float = 10.0) -> str:
     """Gera um resumo textual das mensagens."""
     if not messages:
         return ""
-    # As mensagens são armazenadas com a mais recente primeiro;
-    # selecionamos somente as mais novas e reordenamos cronologicamente
-    # antes de gerar o resumo.
     msgs = list(reversed(messages[:max_messages]))
     _CACHE.expire()
     key = json.dumps(msgs, ensure_ascii=False, sort_keys=True)
@@ -59,3 +57,4 @@ async def summarize(messages: List[Dict[str, str]], max_messages: int = DEFAULT_
         logging.exception("Falha ao resumir mensagens: %s", exc)
     _CACHE[key] = summary
     return summary
+

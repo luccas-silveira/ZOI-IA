@@ -2,13 +2,14 @@ import logging
 import os
 from pathlib import Path
 
-try:  # pragma: no cover - openai is opcional
+try:  # pragma: no cover - openai é opcional
     from openai import AsyncOpenAI
 except Exception:  # pragma: no cover
     AsyncOpenAI = None
 
 
-_PROMPT_PATH = Path(__file__).with_name("prompt.md")
+# prompt.md fica na raiz do projeto; este arquivo está em zoi_ia/
+_PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompt.md"
 
 
 def _system_prompt() -> str:
@@ -17,12 +18,13 @@ def _system_prompt() -> str:
     except OSError:
         return "Você é um assistente que responde de forma educada."
 
+
 async def generate_reply(store: dict, extra_context: str | None = None) -> str:
     """Gera uma resposta usando as últimas 15 mensagens + contexto.
 
     - Mapeia inbound -> role=user e outbound -> role=assistant
     - Mantém ordem cronológica (antiga -> recente)
-    - Inclui system com prompt.md e, se existir, um system extra com o contexto resumido
+    - Inclui system com prompt.md, contexto resumido e (opcional) contexto recuperado
     """
     context = store.get("context") or ""
     raw_messages = store.get("messages") or []
@@ -66,7 +68,7 @@ async def generate_reply(store: dict, extra_context: str | None = None) -> str:
     try:
         client = AsyncOpenAI()
         resp = await client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
+            model=os.getenv("OPENAI_MODEL", "gpt-5-nano"),
             messages=chat_messages,
         )
         return resp.choices[0].message.content.strip()

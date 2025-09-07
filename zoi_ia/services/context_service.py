@@ -1,6 +1,6 @@
 from typing import Dict, Any, List
 
-from summarizer import summarize
+from ..summarizer import summarize
 
 
 async def update_context(store: Dict[str, Any], flush_all: bool = False) -> None:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-import storage as storage_mod
+from zoi_ia import storage as storage_mod
 
 
 def test_store_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -61,4 +61,3 @@ def test_location_token_loading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert storage_mod.load_location_token() == "tok123"
     token, location = storage_mod.load_location_credentials()
     assert token == "tok123" and location == "loc1"
-

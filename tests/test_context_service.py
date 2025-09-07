@@ -1,6 +1,6 @@
 import pytest
 
-from services.context_service import update_context
+from zoi_ia.services.context_service import update_context
 
 
 @pytest.mark.asyncio
@@ -16,7 +16,7 @@ async def test_update_context_under_threshold(monkeypatch):
         return "SUMMARY"
 
     # patch summarize used inside the service module
-    monkeypatch.setattr("services.context_service.summarize", fake_summarize)
+    monkeypatch.setattr("zoi_ia.services.context_service.summarize", fake_summarize)
 
     store = {"messages": [{"direction": "inbound", "body": "hi"}] * 10, "context": "ctx"}
     await update_context(store, flush_all=False)
@@ -32,10 +32,9 @@ async def test_update_context_flush_all(monkeypatch):
         assert any(m.get("direction") == "context" for m in msgs)
         return "SUMMARY"
 
-    monkeypatch.setattr("services.context_service.summarize", fake_summarize)
+    monkeypatch.setattr("zoi_ia.services.context_service.summarize", fake_summarize)
 
     store = {"messages": [{"direction": "inbound", "body": "1"}, {"direction": "outbound", "body": "2"}], "context": "prev"}
     await update_context(store, flush_all=True)
     assert store["context"] == "SUMMARY"
     assert store["messages"] == []
-

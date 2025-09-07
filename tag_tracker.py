@@ -3,22 +3,21 @@ import json
 import logging
 from aiohttp import web
 
-from ai_agent import generate_reply
-from config import TAG_NAME, PORT, VERIFY_SIGNATURE, PUBLIC_KEY_PEM
-from storage import (
+from zoi_ia.ai_agent import generate_reply
+from zoi_ia.config import TAG_NAME, PORT, VERIFY_SIGNATURE, PUBLIC_KEY_PEM, RAG_ENABLED
+from zoi_ia.storage import (
     load_store,
     save_store,
     load_contact_messages,
     save_contact_messages,
 )
-from clients.ghl_client import (
+from zoi_ia.clients.ghl_client import (
     fetch_conversation_messages,
     send_outbound_message,
 )
-from services.context_service import update_context
-from config import RAG_ENABLED
-from rag.index import upsert_messages
-from rag.retriever import retrieve_context
+from zoi_ia.services.context_service import update_context
+from zoi_ia.rag.index import upsert_messages
+from zoi_ia.rag.retriever import retrieve_context
 # =========================
 # Configurações
 # =========================

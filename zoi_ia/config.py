@@ -53,8 +53,6 @@ HTTP_MAX_RETRIES: int = int(os.getenv("HTTP_MAX_RETRIES", "3"))
 HTTP_BACKOFF_BASE: float = float(os.getenv("HTTP_BACKOFF_BASE", "0.5"))
 
 # RAG / Embeddings
-def _default_true() -> bool:
-    return True
-
 RAG_ENABLED: bool = _str_to_bool(os.getenv("RAG_ENABLED", "true"))
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+

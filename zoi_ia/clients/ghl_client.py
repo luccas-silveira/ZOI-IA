@@ -5,7 +5,7 @@ from typing import List, Dict
 
 import httpx
 
-from config import (
+from ..config import (
     GHL_API_URL,
     GHL_MESSAGES_LIST_VERSION,
     GHL_MESSAGES_WRITE_VERSION,
@@ -13,14 +13,13 @@ from config import (
     HTTP_MAX_RETRIES,
     HTTP_BACKOFF_BASE,
 )
-from storage import load_location_token, load_location_credentials
+from ..storage import load_location_token, load_location_credentials
 
 
 def _should_retry(exc: Exception) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
         return code in {429, 500, 502, 503, 504}
-    # network/timeout errors
     return isinstance(exc, httpx.RequestError)
 
 
@@ -37,7 +36,14 @@ async def _request_with_retries(method: str, url: str, **kwargs):
             if not _should_retry(exc) or attempt == HTTP_MAX_RETRIES - 1:
                 break
             backoff = HTTP_BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 0.1)
-            logging.warning("HTTP %s %s falhou (%s). Retentativa %d em %.2fs.", method, url, type(exc).__name__, attempt + 1, backoff)
+            logging.warning(
+                "HTTP %s %s falhou (%s). Retentativa %d em %.2fs.",
+                method,
+                url,
+                type(exc).__name__,
+                attempt + 1,
+                backoff,
+            )
             await asyncio.sleep(backoff)
     raise last_exc  # type: ignore[misc]
 
@@ -67,7 +73,7 @@ async def fetch_conversation_messages(conversation_id: str, limit: int = 30) -> 
         return []
 
     messages: List[Dict] = []
-    for item in reversed(raw_messages):  # API retorna antiga->recente
+    for item in reversed(raw_messages):
         if not isinstance(item, dict):
             logging.warning("Mensagem inesperada no payload: %r", item)
             continue
@@ -105,3 +111,4 @@ async def send_outbound_message(contact_id: str, conversation_id: str, body: str
     except Exception:  # pragma: no cover
         logging.exception("Falha enviando mensagem para %s", contact_id)
     return False
+
