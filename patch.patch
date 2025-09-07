@@ -1,8 +1,8 @@
 diff --git a/tag_tracker.py b/tag_tracker.py
-index c5c69bc3262831cd6739a57dd5b785ad538021c4..78fd77a01ec91aa937c16c7364fb5425816ab43e 100644
+index 93c94151e41518eb1f65630d7bfcfac8486dc750..66e76c8c16f666120fffc365ea296313db2ff63c 100644
 --- a/tag_tracker.py
 +++ b/tag_tracker.py
-@@ -1,35 +1,37 @@
+@@ -1,44 +1,43 @@
  import asyncio
  import base64
  import json
@@ -13,15 +13,15 @@ index c5c69bc3262831cd6739a57dd5b785ad538021c4..78fd77a01ec91aa937c16c7364fb5425
  from aiohttp import web
  import httpx
  
-+from summarizer import summarize
-+
+ from summarizer import summarize
+ 
  # =========================
  # Configurações
  # =========================
- TAG_NAME = "ia/atendimento/ativa"
+ TAG_NAME = "ia - ativa"
  STORE_PATH = Path("tag_ia_atendimento_ativa.json")
  MESSAGES_DIR = Path("messages")
- SUMMARIES_DIR = Path("summaries")
+-SUMMARIES_DIR = Path("summaries")
  LOCATION_TOKEN_PATH = Path("location_token.json")
  PORT = 8081
  
@@ -40,26 +40,18 @@ index c5c69bc3262831cd6739a57dd5b785ad538021c4..78fd77a01ec91aa937c16c7364fb5425
  IocmaiFeAO6fUtNjDeFVkhf5LNb59vECyrHD2SQIrhgXpO4Q3dVNA5rw576PwTzN
  h/AMfHKIjE4xQA1SZuYJmNnmVZLIZBlQAF9Ntd03rfadZ+yDiOXCCs9FkHibELhC
  HULgCsnuDJHcrGNd5/Ddm5hxGQ0ASitgHeMZ0kcIOwKDOzOU53lDza6/Y09T7sYJ
-diff --git a/tag_tracker.py b/tag_tracker.py
-index c5c69bc3262831cd6739a57dd5b785ad538021c4..78fd77a01ec91aa937c16c7364fb5425816ab43e 100644
---- a/tag_tracker.py
-+++ b/tag_tracker.py
-@@ -41,57 +43,61 @@ T1hhTiaCeIY/OwwwNUY2yvcCAwEAAQ==
+ PQe7z0cvj7aE4B+Ax1ZoZGPzpJlZtGXCsu9aTEGEnKzmsFqwcSsnw3JB31IGKAyk
+ T1hhTiaCeIY/OwwwNUY2yvcCAwEAAQ==
+ -----END PUBLIC KEY-----"""
+ 
+ # Memória (simples) para idempotência
  PROCESSED_TAGS = set()
  PROCESSED_MESSAGES = set()
- PROCESSED_OUTBOUND_MESSAGES = set()
- 
- def now_iso():
-     return datetime.now(timezone.utc).isoformat()
- 
- def load_store():
-     if STORE_PATH.exists():
-         try:
-             return json.loads(STORE_PATH.read_text(encoding="utf-8"))
-         except Exception:
-             logging.exception("Falha lendo o store; recriando.")
-     # Apenas IDs
-     return {"lastUpdate": now_iso(), "contactIds": []}
+diff --git a/tag_tracker.py b/tag_tracker.py
+index 93c94151e41518eb1f65630d7bfcfac8486dc750..66e76c8c16f666120fffc365ea296313db2ff63c 100644
+--- a/tag_tracker.py
++++ b/tag_tracker.py
+@@ -58,65 +57,73 @@ def load_store():
  
  def save_store(store):
      store["lastUpdate"] = now_iso()
@@ -70,49 +62,87 @@ index c5c69bc3262831cd6739a57dd5b785ad538021c4..78fd77a01ec91aa937c16c7364fb5425
      path = MESSAGES_DIR / f"{contact_id}.json"
      if path.exists():
          try:
--            return json.loads(path.read_text(encoding="utf-8"))
-+            data = json.loads(path.read_text(encoding="utf-8"))
-+            data.setdefault("messages", [])
-+            data.setdefault("context", "")
-+            return data
+             data = json.loads(path.read_text(encoding="utf-8"))
+             data.setdefault("messages", [])
+             data.setdefault("context", "")
+             return data
          except Exception:
              logging.exception("Falha lendo o histórico de %s; recriando.", contact_id)
--    return {"lastUpdate": now_iso(), "messages": []}
-+    return {"lastUpdate": now_iso(), "messages": [], "context": ""}
+     return {"lastUpdate": now_iso(), "messages": [], "context": ""}
  
  def save_contact_messages(contact_id: str, store):
      store["lastUpdate"] = now_iso()
-+    store.setdefault("context", "")
+     store.setdefault("context", "")
      MESSAGES_DIR.mkdir(exist_ok=True)
      path = MESSAGES_DIR / f"{contact_id}.json"
      path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
  
- def summarize_contact(contact_id: str):
-     path = MESSAGES_DIR / f"{contact_id}.json"
-     if not path.exists():
+-def summarize_contact(contact_id: str):
+-    path = MESSAGES_DIR / f"{contact_id}.json"
+-    if not path.exists():
++async def update_context(store: dict, flush_all: bool = False) -> None:
++    messages = store.get("messages") or []
++    if not messages:
          return
-     try:
-         data = json.loads(path.read_text(encoding="utf-8"))
-     except Exception:
-         logging.exception("Falha lendo o histórico de %s para resumo.", contact_id)
+-    try:
+-        data = json.loads(path.read_text(encoding="utf-8"))
+-    except Exception:
+-        logging.exception("Falha lendo o histórico de %s para resumo.", contact_id)
++
++    context = store.get("context") or ""
++
++    if not flush_all and len(messages) < 30:
          return
-     msgs = data.get("messages") or []
-     lines = [f"{m.get('direction')}: {m.get('body')}" for m in msgs]
-     SUMMARIES_DIR.mkdir(exist_ok=True)
-     summary_path = SUMMARIES_DIR / f"{contact_id}.txt"
-     summary_path.write_text("\n".join(lines), encoding="utf-8")
-     path.unlink()
+-    msgs = data.get("messages") or []
+-    lines = [f"{m.get('direction')}: {m.get('body')}" for m in msgs]
+-    SUMMARIES_DIR.mkdir(exist_ok=True)
+-    summary_path = SUMMARIES_DIR / f"{contact_id}.txt"
+-    summary_path.write_text("\n".join(lines), encoding="utf-8")
+-    path.unlink()
++
++    if flush_all:
++        to_summarize = messages
++        remaining = []
++    else:
++        to_summarize = messages[:15]
++        remaining = messages[15:]
++
++    combined = []
++    if context:
++        combined.append({"direction": "context", "body": context})
++    combined.extend(to_summarize)
++    store["context"] = await summarize(combined)
++    store["messages"] = remaining
  
  def load_location_token():
      try:
          data = json.loads(LOCATION_TOKEN_PATH.read_text(encoding="utf-8"))
          return data.get("access_token")
      except Exception:
+         logging.exception("Falha lendo location_token.json")
+         return None
+ 
+ async def fetch_conversation_messages(conversation_id: str, limit: int = 30):
+     token = load_location_token()
+     if not token:
+         return []
+     url = (
+         f"https://services.leadconnectorhq.com/conversations/{conversation_id}/messages"
+         f"?limit={limit}"
+     )
+     headers = {
+         "Authorization": f"Bearer {token}",
+         "Accept": "application/json",
+         "Version": "2021-04-15",
+     }
+     try:
+         async with httpx.AsyncClient() as client:
+             resp = await client.get(url, headers=headers, timeout=10)
 diff --git a/tag_tracker.py b/tag_tracker.py
-index c5c69bc3262831cd6739a57dd5b785ad538021c4..78fd77a01ec91aa937c16c7364fb5425816ab43e 100644
+index 93c94151e41518eb1f65630d7bfcfac8486dc750..66e76c8c16f666120fffc365ea296313db2ff63c 100644
 --- a/tag_tracker.py
 +++ b/tag_tracker.py
-@@ -199,50 +205,51 @@ async def handle_contact_tag(request: web.Request):
+@@ -205,148 +212,153 @@ async def handle_contact_tag(request: web.Request):
  
      # Checa tipo do evento
      if event.get("type") != "ContactTagUpdate":
@@ -138,13 +168,19 @@ index c5c69bc3262831cd6739a57dd5b785ad538021c4..78fd77a01ec91aa937c16c7364fb5425
              history = await fetch_conversation_messages(conversation_id)
              msg_store["messages"] = history
              msg_store["historyFetched"] = True
-+            msg_store["context"] = await summarize(msg_store["messages"])
-             save_contact_messages(contact_id, msg_store)
+-            msg_store["context"] = await summarize(msg_store["messages"])
+-            save_contact_messages(contact_id, msg_store)
++        await update_context(msg_store, flush_all=True)
++        save_contact_messages(contact_id, msg_store)
      elif not has_tag_now and had_tag:
          ids.discard(contact_id)
          store["contactIds"] = sorted(ids)
          save_store(store)
-         summarize_contact(contact_id)
+-        summarize_contact(contact_id)
++        msg_store = load_contact_messages(contact_id)
++        await update_context(msg_store, flush_all=True)
++        msg_store = {"messages": [], "context": msg_store.get("context", "")}
++        save_contact_messages(contact_id, msg_store)
      else:
          if has_tag_now:
              ids.add(contact_id)
@@ -164,11 +200,10 @@ index c5c69bc3262831cd6739a57dd5b785ad538021c4..78fd77a01ec91aa937c16c7364fb5425
  
      try:
          event = json.loads(raw.decode("utf-8"))
-diff --git a/tag_tracker.py b/tag_tracker.py
-index c5c69bc3262831cd6739a57dd5b785ad538021c4..78fd77a01ec91aa937c16c7364fb5425816ab43e 100644
---- a/tag_tracker.py
-+++ b/tag_tracker.py
-@@ -253,91 +260,93 @@ async def handle_inbound_message(request: web.Request):
+     except Exception:
+         return web.json_response({"error": "invalid json"}, status=400)
+ 
+     wh_id = event.get("webhookId")
      if wh_id:
          if wh_id in PROCESSED_MESSAGES:
              return web.json_response({"ok": True, "dedup": True})
@@ -194,7 +229,9 @@ index c5c69bc3262831cd6739a57dd5b785ad538021c4..78fd77a01ec91aa937c16c7364fb5425
          "conversationId": conversation_id,
      })
      store["messages"] = msgs
-+    store["context"] = await summarize(store["messages"])
+-    store["context"] = await summarize(store["messages"])
++    if len(store["messages"]) >= 30:
++        await update_context(store)
      save_contact_messages(contact_id, store)
  
      return web.json_response({"ok": True})
@@ -237,7 +274,9 @@ index c5c69bc3262831cd6739a57dd5b785ad538021c4..78fd77a01ec91aa937c16c7364fb5425
          "conversationId": conversation_id,
      })
      store["messages"] = msgs
-+    store["context"] = await summarize(store["messages"])
+-    store["context"] = await summarize(store["messages"])
++    if len(store["messages"]) >= 30:
++        await update_context(store)
      save_contact_messages(contact_id, store)
  
      return web.json_response({"ok": True})

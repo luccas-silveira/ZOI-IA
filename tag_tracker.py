@@ -16,7 +16,6 @@ from summarizer import summarize
 TAG_NAME = "ia - ativa"
 STORE_PATH = Path("tag_ia_atendimento_ativa.json")
 MESSAGES_DIR = Path("messages")
-SUMMARIES_DIR = Path("summaries")
 LOCATION_TOKEN_PATH = Path("location_token.json")
 PORT = 8081
 
@@ -80,21 +79,29 @@ def save_contact_messages(contact_id: str, store):
     path = MESSAGES_DIR / f"{contact_id}.json"
     path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def summarize_contact(contact_id: str):
-    path = MESSAGES_DIR / f"{contact_id}.json"
-    if not path.exists():
+async def update_context(store: dict, flush_all: bool = False) -> None:
+    messages = store.get("messages") or []
+    if not messages:
         return
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        logging.exception("Falha lendo o histórico de %s para resumo.", contact_id)
+
+    context = store.get("context") or ""
+
+    if not flush_all and len(messages) < 30:
         return
-    msgs = data.get("messages") or []
-    lines = [f"{m.get('direction')}: {m.get('body')}" for m in msgs]
-    SUMMARIES_DIR.mkdir(exist_ok=True)
-    summary_path = SUMMARIES_DIR / f"{contact_id}.txt"
-    summary_path.write_text("\n".join(lines), encoding="utf-8")
-    path.unlink()
+
+    if flush_all:
+        to_summarize = messages
+        remaining = []
+    else:
+        to_summarize = messages[:15]
+        remaining = messages[15:]
+
+    combined = []
+    if context:
+        combined.append({"direction": "context", "body": context})
+    combined.extend(to_summarize)
+    store["context"] = await summarize(combined)
+    store["messages"] = remaining
 
 def load_location_token():
     try:
@@ -227,13 +234,16 @@ async def handle_contact_tag(request: web.Request):
             history = await fetch_conversation_messages(conversation_id)
             msg_store["messages"] = history
             msg_store["historyFetched"] = True
-            msg_store["context"] = await summarize(msg_store["messages"])
-            save_contact_messages(contact_id, msg_store)
+        await update_context(msg_store, flush_all=True)
+        save_contact_messages(contact_id, msg_store)
     elif not has_tag_now and had_tag:
         ids.discard(contact_id)
         store["contactIds"] = sorted(ids)
         save_store(store)
-        summarize_contact(contact_id)
+        msg_store = load_contact_messages(contact_id)
+        await update_context(msg_store, flush_all=True)
+        msg_store = {"messages": [], "context": msg_store.get("context", "")}
+        save_contact_messages(contact_id, msg_store)
     else:
         if has_tag_now:
             ids.add(contact_id)
@@ -282,7 +292,8 @@ async def handle_inbound_message(request: web.Request):
         "conversationId": conversation_id,
     })
     store["messages"] = msgs
-    store["context"] = await summarize(store["messages"])
+    if len(store["messages"]) >= 30:
+        await update_context(store)
     save_contact_messages(contact_id, store)
 
     return web.json_response({"ok": True})
@@ -325,7 +336,8 @@ async def handle_outbound_message(request: web.Request):
         "conversationId": conversation_id,
     })
     store["messages"] = msgs
-    store["context"] = await summarize(store["messages"])
+    if len(store["messages"]) >= 30:
+        await update_context(store)
     save_contact_messages(contact_id, store)
 
     return web.json_response({"ok": True})
