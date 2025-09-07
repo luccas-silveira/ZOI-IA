@@ -16,6 +16,9 @@ from clients.ghl_client import (
     send_outbound_message,
 )
 from services.context_service import update_context
+from config import RAG_ENABLED
+from rag.index import upsert_messages
+from rag.retriever import retrieve_context
 # =========================
 # Configurações
 # =========================
@@ -105,6 +108,9 @@ async def handle_contact_tag(request: web.Request):
             history = await fetch_conversation_messages(conversation_id)
             msg_store["messages"] = history
             msg_store["historyFetched"] = True
+            if RAG_ENABLED:
+                # indexa histórico inicial
+                await upsert_messages(contact_id, history)
         await update_context(msg_store, flush_all=True)
         save_contact_messages(contact_id, msg_store)
     elif not has_tag_now and had_tag:
@@ -166,10 +172,17 @@ async def handle_inbound_message(request: web.Request):
     if len(store["messages"]) >= 30:
         await update_context(store)
     save_contact_messages(contact_id, store)
+    if RAG_ENABLED:
+        await upsert_messages(contact_id, [msgs[0]])
 
     store_tags = load_store()
     if contact_id in set(store_tags.get("contactIds") or []):
-        reply = await generate_reply(store)
+        extra = ""
+        if RAG_ENABLED:
+            extra = await retrieve_context(contact_id, body or "", k=5)
+        else:
+            extra = ""
+        reply = await generate_reply(store, extra_context=(extra or None))
         if reply:
             ok = await send_outbound_message(contact_id, conversation_id, reply)
             if ok:
@@ -184,6 +197,8 @@ async def handle_inbound_message(request: web.Request):
                 if len(store["messages"]) >= 30:
                     await update_context(store)
                 save_contact_messages(contact_id, store)
+                if RAG_ENABLED:
+                    await upsert_messages(contact_id, [msgs[0]])
 
     return web.json_response({"ok": True})
 
@@ -232,6 +247,8 @@ async def handle_outbound_message(request: web.Request):
     if len(store["messages"]) >= 30:
         await update_context(store)
     save_contact_messages(contact_id, store)
+    if RAG_ENABLED:
+        await upsert_messages(contact_id, [msgs[0]])
 
     return web.json_response({"ok": True})
 

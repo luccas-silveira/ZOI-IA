@@ -17,7 +17,7 @@ def _system_prompt() -> str:
     except OSError:
         return "Você é um assistente que responde de forma educada."
 
-async def generate_reply(store: dict) -> str:
+async def generate_reply(store: dict, extra_context: str | None = None) -> str:
     """Gera uma resposta usando as últimas 15 mensagens + contexto.
 
     - Mapeia inbound -> role=user e outbound -> role=assistant
@@ -51,6 +51,11 @@ async def generate_reply(store: dict) -> str:
         chat_messages.append({
             "role": "system",
             "content": f"Contexto resumido (não compartilhar com o cliente):\n{context}",
+        })
+    if extra_context:
+        chat_messages.append({
+            "role": "system",
+            "content": f"Contexto recuperado (não compartilhar com o cliente):\n{extra_context}",
         })
 
     for m in reversed(convo):

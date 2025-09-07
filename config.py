@@ -18,6 +18,7 @@ PORT: int = int(os.getenv("PORT", "8081"))
 STORE_PATH: Path = Path(os.getenv("STORE_PATH", "data/tag_ia_atendimento_ativa.json"))
 MESSAGES_DIR: Path = Path(os.getenv("MESSAGES_DIR", "data/messages"))
 LOCATION_TOKEN_PATH: Path = Path(os.getenv("LOCATION_TOKEN_PATH", "data/location_token.json"))
+EMBEDDINGS_DIR: Path = Path(os.getenv("EMBEDDINGS_DIR", "data/embeddings"))
 
 # Assinatura de webhooks
 VERIFY_SIGNATURE: bool = _str_to_bool(os.getenv("VERIFY_SIGNATURE", "true"))
@@ -50,3 +51,10 @@ GHL_MESSAGES_WRITE_VERSION: str = os.getenv("GHL_MESSAGES_WRITE_VERSION", "2021-
 HTTP_TIMEOUT: float = float(os.getenv("HTTP_TIMEOUT", "10"))
 HTTP_MAX_RETRIES: int = int(os.getenv("HTTP_MAX_RETRIES", "3"))
 HTTP_BACKOFF_BASE: float = float(os.getenv("HTTP_BACKOFF_BASE", "0.5"))
+
+# RAG / Embeddings
+def _default_true() -> bool:
+    return True
+
+RAG_ENABLED: bool = _str_to_bool(os.getenv("RAG_ENABLED", "true"))
+EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")

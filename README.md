@@ -22,6 +22,7 @@ Mantenha esses arquivos apenas localmente. Caso sejam removidos ou expirem, bast
 - `storage.py` – I/O local (store, mensagens por contato, tokens) centralizado em `data/`.
 - `clients/ghl_client.py` – cliente HTTP para GoHighLevel (listar mensagens de conversas e enviar respostas).
 - `services/context_service.py` – regra de atualização/compactação do contexto a partir do histórico.
+ - `rag/` – RAG de conversa: `embedding.py` (gera embeddings), `index.py` (índice por contato em `data/embeddings/`), `retriever.py` (busca top‑K e formata contexto).
 
 ## Instalação
 
@@ -36,6 +37,11 @@ pip install -r requirements.txt
    - `OPENAI_MODEL`: modelo a ser usado no resumo (ex.: `gpt-3.5-turbo`).
 2. **Tokens do GoHighLevel**
    - Execute `python oauth.py` e informe `GHL_CLIENT_ID` e `GHL_CLIENT_SECRET` para gerar `data/agency_token.json` e `data/location_token.json`.
+
+3. **RAG (opcional, ativado por padrão)**
+   - `RAG_ENABLED=true|false` (default `true`)
+   - `EMBEDDING_MODEL` (default `text-embedding-3-small` com OpenAI; se sem chave, usa fallback local determinístico)
+   - `EMBEDDINGS_DIR` (default `data/embeddings`)
 
 ## Exemplos de execução
 
