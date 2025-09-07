@@ -4,6 +4,8 @@ import logging
 import os
 from typing import Dict, List
 
+from cachetools import TTLCache
+
 try:
     from openai import AsyncOpenAI
 except Exception:  # pragma: no cover - fallback if openai not installed
@@ -14,8 +16,8 @@ try:
 except Exception:  # pragma: no cover - fallback if transformers not installed
     pipeline = None
 
-# cache simples em memória para evitar custo repetido
-_CACHE: dict[str, str] = {}
+# cache com expiração para evitar custo repetido
+_CACHE = TTLCache(maxsize=128, ttl=3600)
 DEFAULT_MAX_MESSAGES = 50
 
 async def summarize(messages: List[Dict[str, str]], max_messages: int = DEFAULT_MAX_MESSAGES, timeout: float = 10.0) -> str:
@@ -24,9 +26,11 @@ async def summarize(messages: List[Dict[str, str]], max_messages: int = DEFAULT_
         return ""
     # Limita o histórico
     msgs = messages[-max_messages:]
+    _CACHE.expire()
     key = json.dumps(msgs, ensure_ascii=False, sort_keys=True)
-    if key in _CACHE:
-        return _CACHE[key]
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached
     text = "\n".join(f"{m.get('direction')}: {m.get('body')}" for m in msgs)
     summary = text
     try:

@@ -1,3 +1,6 @@
 messages/
 summaries/
+agency_token.json
+location_token.json
+tag_ia_atendimento_ativa.json
 patch.patch
