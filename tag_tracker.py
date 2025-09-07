@@ -120,15 +120,24 @@ async def fetch_conversation_messages(conversation_id: str, limit: int = 30):
         logging.exception("Falha buscando mensagens da conversa %s", conversation_id)
         return []
 
+    raw_messages = payload.get("messages", [])
+    if isinstance(raw_messages, dict):
+        raw_messages = raw_messages.get("messages", [])
+    if not isinstance(raw_messages, list):
+        logging.warning("Formato inesperado de mensagens: %r", raw_messages)
+        return []
+
     messages = []
-    for item in payload.get("messages", []):
+    for item in raw_messages:
+        if not isinstance(item, dict):
+            logging.warning("Mensagem inesperada no payload: %r", item)
+            continue
         body = item.get("body") or item.get("text") or ""
         direction = item.get("direction") or item.get("messageDirection")
         direction = "outbound" if direction == "outbound" else "inbound"
         messages.append({
             "direction": direction,
             "body": body,
-            "conversationId": conversation_id,
         })
     return messages
 
