@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from aiohttp import web
+import httpx
 
 # =========================
 # Configurações
@@ -13,6 +14,8 @@ from aiohttp import web
 TAG_NAME = "ia/atendimento/ativa"
 STORE_PATH = Path("tag_ia_atendimento_ativa.json")
 MESSAGES_DIR = Path("messages")
+SUMMARIES_DIR = Path("summaries")
+LOCATION_TOKEN_PATH = Path("location_token.json")
 PORT = 8081
 
 # Opcional: verificar assinatura RSA dos webhooks (requer 'cryptography')
@@ -39,10 +42,8 @@ PROCESSED_TAGS = set()
 PROCESSED_MESSAGES = set()
 PROCESSED_OUTBOUND_MESSAGES = set()
 
-
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
-
 
 def load_store():
     if STORE_PATH.exists():
@@ -53,11 +54,9 @@ def load_store():
     # Apenas IDs
     return {"lastUpdate": now_iso(), "contactIds": []}
 
-
 def save_store(store):
     store["lastUpdate"] = now_iso()
     STORE_PATH.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
-
 
 def load_contact_messages(contact_id: str):
     MESSAGES_DIR.mkdir(exist_ok=True)
@@ -69,13 +68,58 @@ def load_contact_messages(contact_id: str):
             logging.exception("Falha lendo o histórico de %s; recriando.", contact_id)
     return {"lastUpdate": now_iso(), "messages": []}
 
-
 def save_contact_messages(contact_id: str, store):
     store["lastUpdate"] = now_iso()
     MESSAGES_DIR.mkdir(exist_ok=True)
     path = MESSAGES_DIR / f"{contact_id}.json"
     path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
 
+def summarize_contact(contact_id: str):
+    path = MESSAGES_DIR / f"{contact_id}.json"
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logging.exception("Falha lendo o histórico de %s para resumo.", contact_id)
+        return
+    msgs = data.get("messages") or []
+    lines = [f"{m.get('direction')}: {m.get('body')}" for m in msgs]
+    SUMMARIES_DIR.mkdir(exist_ok=True)
+    summary_path = SUMMARIES_DIR / f"{contact_id}.txt"
+    summary_path.write_text("\n".join(lines), encoding="utf-8")
+    path.unlink()
+
+def load_location_token():
+    try:
+        data = json.loads(LOCATION_TOKEN_PATH.read_text(encoding="utf-8"))
+        return data.get("access_token")
+    except Exception:
+        logging.exception("Falha lendo location_token.json")
+        return None
+
+async def fetch_existing_messages(contact_id: str):
+    token = load_location_token()
+    if not token:
+        return []
+    url = f"https://services.leadconnectorhq.com/conversations/{contact_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            payload = resp.json()
+    except Exception:
+        logging.exception("Falha buscando histórico de %s", contact_id)
+        return []
+
+    messages = []
+    for item in payload.get("messages", []):
+        body = item.get("body") or item.get("text") or ""
+        direction = item.get("direction") or item.get("messageDirection")
+        direction = "outbound" if direction == "outbound" else "inbound"
+        messages.append({"direction": direction, "body": body})
+    return messages
 
 def verify_signature(payload_bytes: bytes, signature_b64: str) -> bool:
     if not VERIFY_SIGNATURE:
@@ -97,10 +141,8 @@ def verify_signature(payload_bytes: bytes, signature_b64: str) -> bool:
         logging.error("Assinatura inválida: %s", e)
         return False
 
-
 async def handle_health(_req):
     return web.json_response({"ok": True})
-
 
 async def handle_list(_req):
     store = load_store()
@@ -113,7 +155,6 @@ async def handle_list(_req):
             "lastUpdate": store["lastUpdate"],
         }
     )
-
 
 async def handle_contact_tag(request: web.Request):
     raw = await request.read()
@@ -147,17 +188,29 @@ async def handle_contact_tag(request: web.Request):
 
     store = load_store()
     ids = set(store.get("contactIds") or [])
+    had_tag = contact_id in ids
+    has_tag_now = TAG_NAME in tags
 
-    if TAG_NAME in tags:
+    if has_tag_now and not had_tag:
         ids.add(contact_id)
-    else:
+        store["contactIds"] = sorted(ids)
+        save_store(store)
+        history = await fetch_existing_messages(contact_id)
+        save_contact_messages(contact_id, {"messages": history})
+    elif not has_tag_now and had_tag:
         ids.discard(contact_id)
+        store["contactIds"] = sorted(ids)
+        save_store(store)
+        summarize_contact(contact_id)
+    else:
+        if has_tag_now:
+            ids.add(contact_id)
+        else:
+            ids.discard(contact_id)
+        store["contactIds"] = sorted(ids)
+        save_store(store)
 
-    store["contactIds"] = sorted(ids)  # opcional: manter ordenado
-    save_store(store)
-
-    return web.json_response({"ok": True, "present": TAG_NAME in tags})
-
+    return web.json_response({"ok": True, "present": has_tag_now})
 
 async def handle_inbound_message(request: web.Request):
     raw = await request.read()
@@ -181,15 +234,14 @@ async def handle_inbound_message(request: web.Request):
     if not contact_id:
         return web.json_response({"error": "missing contact id"}, status=422)
     body = event.get("body")
+
     store = load_contact_messages(contact_id)
     msgs = store.get("messages") or []
     msgs.append({"direction": "inbound", "body": body})
     store["messages"] = msgs
     save_contact_messages(contact_id, store)
-    
-    
-    return web.json_response({"ok": True})
 
+    return web.json_response({"ok": True})
 
 async def handle_outbound_message(request: web.Request):
     raw = await request.read()
@@ -222,7 +274,6 @@ async def handle_outbound_message(request: web.Request):
 
     return web.json_response({"ok": True})
 
-
 def build_app():
     app = web.Application()
     app.add_routes(
@@ -236,12 +287,10 @@ def build_app():
     )
     return app
 
-
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     app = build_app()
     web.run_app(app, port=PORT)
-
 
 if __name__ == "__main__":
     main()
