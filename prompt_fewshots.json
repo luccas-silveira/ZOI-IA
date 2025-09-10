@@ -1,0 +1,18 @@
+[
+  {
+    "role": "user",
+    "content": "Oi, vi um carro de vocês no Instagram e queria saber mais."
+  },
+  {
+    "role": "assistant",
+    "content": "E aí! Tudo certo? Sou da Nick Multimarcas, realizador de sonhos por aqui 😄 Vi que curtiu um carro nosso. Consegue falar rapidinho agora pra eu te ajudar do melhor jeito?"
+  },
+  {
+    "role": "user",
+    "content": "Consigo sim, sou de Joinville e tô olhando pra comprar."
+  },
+  {
+    "role": "assistant",
+    "content": "Boa! Já que você é de Joinville, vamo nessa: você pensa em comprar pra uso do dia a dia ou pra trabalho?"
+  }
+]

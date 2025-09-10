@@ -4,7 +4,17 @@ import logging
 from aiohttp import web
 
 from zoi_ia.ai_agent import generate_reply
-from zoi_ia.config import TAG_NAME, PORT, VERIFY_SIGNATURE, PUBLIC_KEY_PEM, RAG_ENABLED
+from zoi_ia.config import (
+    TAG_NAME,
+    PORT,
+    VERIFY_SIGNATURE,
+    PUBLIC_KEY_PEM,
+    RAG_ENABLED,
+    RAG_K,
+    RAG_MIN_SIM,
+    TRANSCRIBE_AUDIO,
+    LOG_WEBHOOKS,
+)
 from zoi_ia.storage import (
     load_store,
     save_store,
@@ -18,6 +28,8 @@ from zoi_ia.clients.ghl_client import (
 from zoi_ia.services.context_service import update_context
 from zoi_ia.rag.index import upsert_messages
 from zoi_ia.rag.retriever import retrieve_context
+from zoi_ia.transcriber import extract_audio_urls, transcribe_from_url
+from zoi_ia.vision import extract_image_urls, describe_image_from_url
 # =========================
 # Configurações
 # =========================
@@ -102,6 +114,8 @@ async def handle_contact_tag(request: web.Request):
         store["contactIds"] = sorted(ids)
         save_store(store)
         msg_store = load_contact_messages(contact_id)
+        # garante estrutura mínima do fluxo
+        msg_store.setdefault("flow", {"current_step": "", "checklist": []})
         conversation_id = msg_store.get("conversationId")
         if conversation_id:
             history = await fetch_conversation_messages(conversation_id)
@@ -132,6 +146,11 @@ async def handle_contact_tag(request: web.Request):
 
 async def handle_inbound_message(request: web.Request):
     raw = await request.read()
+    if LOG_WEBHOOKS:
+        try:
+            logging.info("Inbound RAW: %s", raw.decode("utf-8", errors="replace"))
+        except Exception:
+            logging.info("Inbound RAW: <binary %d bytes>", len(raw))
 
     sig = request.headers.get("x-wh-signature") or request.headers.get("X-Wh-Signature")
     if sig and not verify_signature(raw, sig):
@@ -141,6 +160,8 @@ async def handle_inbound_message(request: web.Request):
         event = json.loads(raw.decode("utf-8"))
     except Exception:
         return web.json_response({"error": "invalid json"}, status=400)
+    if LOG_WEBHOOKS:
+        logging.info("Inbound JSON: %s", json.dumps(event, ensure_ascii=False))
 
     wh_id = event.get("webhookId")
     if wh_id:
@@ -152,9 +173,19 @@ async def handle_inbound_message(request: web.Request):
     if not contact_id:
         return web.json_response({"error": "missing contact id"}, status=422)
     body = event.get("body")
+    orig_body = body
     conversation_id = event.get("conversationId")
 
+    # Gate: só processa se o contato tiver a tag ativa
+    store_tags = load_store()
+    active_ids = set(store_tags.get("contactIds") or [])
+    if contact_id not in active_ids:
+        if LOG_WEBHOOKS:
+            logging.info("Ignorando inbound: contato %s sem tag ativa", contact_id)
+        return web.json_response({"ok": True, "ignored": True, "reason": "no_tag"})
+
     store = load_contact_messages(contact_id)
+    store.setdefault("flow", {"current_step": "", "checklist": []})
     if conversation_id is not None:
         store["conversationId"] = conversation_id
         if not store.get("historyFetched"):
@@ -167,6 +198,41 @@ async def handle_inbound_message(request: web.Request):
         "body": body,
         "conversationId": conversation_id,
     })
+    # Transcrição de áudios (se habilitado) — substitui o corpo do inbound
+    if TRANSCRIBE_AUDIO:
+        audio_urls = extract_audio_urls(event)
+        if LOG_WEBHOOKS:
+            logging.info("Audio URLs detectados: %s", audio_urls)
+        transcripts: list[str] = []
+        for url in audio_urls:
+            text = await transcribe_from_url(url)
+            if text:
+                transcripts.append(text)
+        if transcripts:
+            new_body = "\n\n".join(transcripts)
+            msgs[0]["body"] = new_body
+            body = new_body
+
+    # Descrição de imagens (se habilitado) — substitui ou concatena
+    from zoi_ia.config import DESCRIBE_IMAGES  # import local para evitar ciclos
+    if DESCRIBE_IMAGES:
+        image_urls = extract_image_urls(event)
+        if LOG_WEBHOOKS:
+            logging.info("Image URLs detectados: %s", image_urls)
+        descriptions: list[str] = []
+        for url in image_urls:
+            desc = await describe_image_from_url(url)
+            if desc:
+                descriptions.append(desc)
+        if descriptions:
+            # Se já substituímos por áudio, concatena; senão, substitui
+            if body != orig_body and body:
+                combined = [body] + descriptions
+                new_body = "\n\n".join(combined)
+            else:
+                new_body = "\n\n".join(descriptions)
+            msgs[0]["body"] = new_body
+            body = new_body
     store["messages"] = msgs
     if len(store["messages"]) >= 30:
         await update_context(store)
@@ -178,7 +244,16 @@ async def handle_inbound_message(request: web.Request):
     if contact_id in set(store_tags.get("contactIds") or []):
         extra = ""
         if RAG_ENABLED:
-            extra = await retrieve_context(contact_id, body or "", k=5)
+            # evita duplicar conteúdo que já está nas últimas mensagens
+            last_msgs = (store.get("messages") or [])[:15]
+            exclude = [m.get("body") or "" for m in last_msgs]
+            extra = await retrieve_context(
+                contact_id,
+                body or "",
+                k=RAG_K,
+                min_sim=RAG_MIN_SIM,
+                exclude_bodies=exclude,
+            )
         else:
             extra = ""
         reply = await generate_reply(store, extra_context=(extra or None))
@@ -203,6 +278,11 @@ async def handle_inbound_message(request: web.Request):
 
 async def handle_outbound_message(request: web.Request):
     raw = await request.read()
+    if LOG_WEBHOOKS:
+        try:
+            logging.info("Outbound RAW: %s", raw.decode("utf-8", errors="replace"))
+        except Exception:
+            logging.info("Outbound RAW: <binary %d bytes>", len(raw))
 
     sig = request.headers.get("x-wh-signature") or request.headers.get("X-Wh-Signature")
     if sig and not verify_signature(raw, sig):
@@ -212,6 +292,8 @@ async def handle_outbound_message(request: web.Request):
         event = json.loads(raw.decode("utf-8"))
     except Exception:
         return web.json_response({"error": "invalid json"}, status=400)
+    if LOG_WEBHOOKS:
+        logging.info("Outbound JSON: %s", json.dumps(event, ensure_ascii=False))
 
     wh_id = event.get("webhookId")
     if wh_id:
@@ -224,12 +306,20 @@ async def handle_outbound_message(request: web.Request):
         return web.json_response({"error": "missing contact id"}, status=422)
     body = event.get("body")
     conversation_id = event.get("conversationId")
+    # Gate: só processa se o contato tiver a tag ativa
+    store_tags = load_store()
+    active_ids = set(store_tags.get("contactIds") or [])
+    if contact_id not in active_ids:
+        if LOG_WEBHOOKS:
+            logging.info("Ignorando outbound: contato %s sem tag ativa", contact_id)
+        return web.json_response({"ok": True, "ignored": True, "reason": "no_tag"})
 
     if (conversation_id, body) in AI_GENERATED_MESSAGES:
         AI_GENERATED_MESSAGES.discard((conversation_id, body))
         return web.json_response({"ok": True, "ignored": True})
 
     store = load_contact_messages(contact_id)
+    store.setdefault("flow", {"current_step": "", "checklist": []})
     if conversation_id is not None:
         store["conversationId"] = conversation_id
         if not store.get("historyFetched"):

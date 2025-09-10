@@ -1,0 +1,8 @@
+{
+    "workbench.activityBar.location": "top",
+    "workbench.sideBar.location": "left",
+    "gitlens.graph.sidebar.enabled": false,
+    "workbench.panel.defaultLocation": "bottom",
+    "workbench.panel.showLabels": false,
+    "accessibility.verbosity.panelChat": true
+}
